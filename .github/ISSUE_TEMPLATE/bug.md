@@ -5,7 +5,7 @@ title: ''
 ---
 
 <!-- Set the issue TYPE to **Bug** in the issue UI (a Type chosen in the sidebar, NOT a label — there is no
-     `bug` label in this repo). Write the report BUSINESS-FIRST: what the user experiences and why it
+     `bug` label in mark-my-work repositories). Write the report BUSINESS-FIRST: what the user experiences and why it
      matters. Keep code, file:line refs, stack traces, and fix mechanics OUT of the top sections — group
      them under Implementation Notes. The title names the user-facing problem, with no number prefix. -->
 

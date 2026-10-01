@@ -3,7 +3,7 @@ name: Move linked issue to In review (MMW board)
 # When a PR flips from Draft to "Ready for review" -- the `ready_for_review` PR action
 # type, which fires on EXACTLY that transition (no polling/diffing needed) -- advance
 # each issue the PR closes from "In progress" to "In review" in the org-level "MMW"
-# Project (v2, #2). Deliberately MINIMAL, unlike its sibling move-issue-in-progress.yml:
+# Project (v2, #2). Deliberately MINIMAL, unlike its sibling mmw-board-move-issue-in-progress.yml:
 # it only acts when the issue's CURRENT Status is exactly "In progress" (not any
 # not-started column, not "no status") and only on this one event -- every other case
 # (re-parked cards, reopens, synchronize, a PR opened already non-draft, ...) is left
@@ -11,16 +11,15 @@ name: Move linked issue to In review (MMW board)
 #
 # ACCEPTED TRADE-OFF (won't-fix): because it triggers ONLY on the one-shot
 # `ready_for_review` transition, a transient per-issue query/mutation failure reddens the
-# run (loud + visible) but is NOT retried automatically -- unlike move-issue-in-progress
+# run (loud + visible) but is NOT retried automatically -- unlike mmw-board-move-issue-in-progress
 # .yml, which self-heals across its recurring events (opened/edited/synchronize/reopened).
 # Recovery is a manual job re-run or a draft->ready re-flip. The failure fails LOUD, so the
 # card is never silently left behind; auto-retry isn't worth a broader trigger set here.
 #
-# Needs the same PROJECT_TOKEN PAT as move-issue-in-progress.yml (see that file's header
-# for the scope requirements) and skips cleanly when the secret is absent. (Unlike its
-# `pull_request`-triggered sibling, `pull_request_target` DOES expose secrets to fork /
-# Dependabot PRs -- harmless here, since this workflow never checks out or executes PR
-# code; see the trigger note below.)
+# Authenticates as the MMW Automation GitHub App, as mmw-board-move-issue-in-progress.yml
+# does (see that file's header): a one-hour token limited to this repository. A repository
+# without the app's key fails at the token step rather than skipping; a run Dependabot
+# triggers gets no Actions secrets, so the job skips Dependabot.
 
 on:
   # Each repository's caller file sets the real trigger and the concurrency group, and
@@ -33,7 +32,7 @@ on:
   # conflict." So a PR flipped Draft->ready WHILE CONFLICTED had its one-shot
   # `ready_for_review` dropped ENTIRELY: no run, no red X, nothing to notice -- and since the
   # event never re-fires on a later push, the card stranded at "In progress" forever.
-  # (Observed: PR #337 -> issue #265. The flip fired at 03:13:18Z with ZERO runs scheduled;
+  # (Observed: PR mark-my-work/mmw#337 -> issue mark-my-work/mmw#265. The flip fired at 03:13:18Z with ZERO runs scheduled;
   # a run appeared 2s after the conflict was resolved and pushed, proving the branch's
   # workflows were fine and only the conflict had suppressed them.) That is the worst case to
   # drop silently: the Draft->ready flip is exactly when a long-lived branch is most likely to
@@ -44,13 +43,14 @@ on:
   # while keeping the trigger at the SAME single one-shot event (see the "deliberately
   # MINIMAL" note above). Adding `synchronize` was REJECTED as the fix: it would re-advance a
   # card a developer had deliberately re-parked to "In progress" on their very next push --
-  # precisely the behaviour move-issue-in-progress.yml's not-started guard exists to avoid.
+  # precisely the behaviour mmw-board-move-issue-in-progress.yml's not-started guard exists to avoid.
   #
   # SAFE despite the usual pull_request_target hazard: this workflow NEVER checks out or runs
   # PR code. It only issues `gh api` calls keyed on the PR NUMBER (an integer from the event
   # payload); no PR title / body / branch name is ever interpolated into a shell command.
-  # NOTE: the workflow file is read from the BASE branch, so edits here only take effect once
-  # merged to main (and cannot be tampered with from a PR branch -- a further win).
+  # NOTE: the caller file is read from the calling repository's BASE branch, and it calls this
+  # file at mark-my-work/.github@main, so an edit here takes effect in every repository once
+  # merged to .github's main, and a pull request in a calling repository cannot change it.
   workflow_call:
 
 permissions:
@@ -63,7 +63,7 @@ permissions:
 # transition, but a PR can in principle be flipped back to draft and forward again.
 
 env:
-  # See move-issue-in-progress.yml for why the project is targeted by fixed number while
+  # See mmw-board-move-issue-in-progress.yml for why the project is targeted by fixed number while
   # the Status field and its options are resolved BY NAME at run time (self-heals a rename).
   PROJECT_NUMBER: 2
   STATUS_FIELD_NAME: Status
@@ -72,6 +72,8 @@ env:
 
 jobs:
   move-linked-issues:
+    # A run Dependabot triggers gets no Actions secrets, so the token step would fail it.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     env:
       OWNER: ${{ github.repository_owner }}
@@ -79,7 +81,8 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PAGE_CAP: 100
     steps:
-      # A one-hour token for the MMW Automation GitHub App (D14 of mmw's plan 876). A repository
+      # A one-hour token for the MMW Automation GitHub App (D14 of mark-my-work/mmw's plan 876),
+      # limited to this repository and to the permissions this workflow uses. A repository
       # without the app's key fails here, loudly, rather than skipping.
       - name: Get a token for the MMW Automation app
         id: app-token
@@ -88,30 +91,18 @@ jobs:
           client-id: ${{ vars.MMW_AUTOMATION_CLIENT_ID }}
           private-key: ${{ secrets.MMW_AUTOMATION_PRIVATE_KEY }}
           owner: mark-my-work
-      # A secret can't be read in an `if:` directly, so gate on a step OUTPUT instead.
-      - name: Check the PROJECT_TOKEN secret is available
-        id: token
-        env:
-          PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -uo pipefail
-          if [ -n "${PROJECT_TOKEN:-}" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "PROJECT_TOKEN is not available -- skipping the In review move. Either the PAT secret is missing, OR this is a fork / Dependabot PR (GitHub does not expose Actions secrets to those runs, by design)."
-          fi
-
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: read
+          permission-organization-projects: write
       - name: Find issues this PR will close
         id: linked
-        if: steps.token.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # closingIssuesReferences can carry a CROSS-repo link, so also read each
           # reference's repository and keep only refs in THIS repo (mirrors
-          # move-issue-in-progress.yml's identical read -- see that file for the full
+          # mmw-board-move-issue-in-progress.yml's identical read -- see that file for the full
           # rationale on the NOT_FOUND/error posture and the null-repository guard).
           if ! refs_json=$(gh api graphql -f query='
               query($owner: String!, $repo: String!, $pr: Int!, $first: Int!) {
@@ -153,7 +144,7 @@ jobs:
 
           # One query resolves the project's node id, its Status field id, BOTH the
           # "In progress" and "In review" option ids by name, AND this repo's node id with
-          # the SAME PROJECT_TOKEN (see move-issue-in-progress.yml for why the repo read
+          # the SAME app token (see mmw-board-move-issue-in-progress.yml for why the repo read
           # matters -- a token missing repo access would otherwise have every linked issue
           # read as NOT_FOUND below and be silently swallowed as "not in the project").
           if ! project_json=$(gh api graphql -f query='
@@ -171,13 +162,13 @@ jobs:
                 }
                 repository(owner: $org, name: $repo) { id }
               }' -f org="$OWNER" -f repo="$REPO" -F number="$PROJECT_NUMBER" -f statusField="$STATUS_FIELD_NAME"); then
-            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER or the '$OWNER/$REPO' repository with PROJECT_TOKEN. Is the PAT valid and granted BOTH org Projects read AND access to this repo? gh's error is above."
+            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER or the '$OWNER/$REPO' repository with the MMW Automation app token. Is the app installed on '$OWNER/$REPO', with organization Projects read and write and repository Issues read? gh's error is above."
             exit 1
           fi
 
           # One value per line + mapfile (not @tsv + IFS=$'\t' read): an empty option id
           # would otherwise collapse a consecutive-tab run and shift the remaining fields --
-          # see move-issue-in-progress.yml for the full explanation of this trap.
+          # see mmw-board-move-issue-in-progress.yml for the full explanation of this trap.
           mapfile -t preflight_fields < <(jq -r --arg from "$FROM_STATUS_NAME" --arg to "$TO_STATUS_NAME" '
             .data as $d
             | $d.organization.projectV2 as $p
@@ -199,12 +190,12 @@ jobs:
           fi
 
           if [ -z "$repo_id" ]; then
-            echo "::error::PROJECT_TOKEN resolved the org project but CANNOT see '$OWNER/$REPO' -- it is missing repo access. Without it every linked issue reads as NOT_FOUND and no card would be advanced."
+            echo "::error::The MMW Automation app token resolved the org project but CANNOT see '$OWNER/$REPO' -- the app is not installed on it, or lacks repository Issues read. Without it every linked issue reads as NOT_FOUND and no card would be advanced."
             exit 1
           fi
 
           # A per-issue failure must not abort the rest of the batch, but must not pass
-          # silently either -- mirrors move-issue-in-progress.yml's tally.
+          # silently either -- mirrors mmw-board-move-issue-in-progress.yml's tally.
           failed=0
           while IFS= read -r number; do
             [ -z "$number" ] && continue
@@ -242,7 +233,7 @@ jobs:
               # An issue in >100 projects may have had its MMW item truncated by the
               # first:100 (unpaginated) cap rather than genuinely absent -- warn so a
               # false "not in the project" is visible instead of a silent skip (mirrors
-              # move-issue-in-progress.yml).
+              # mmw-board-move-issue-in-progress.yml).
               item_projects_total=$(jq -r '.data.repository.issue.projectItems.totalCount // 0' <<<"$item_json")
               if [ "$item_projects_total" -gt "$PAGE_CAP" ]; then
                 echo "::warning::#$number is in $item_projects_total projects but only the first $PAGE_CAP are read -- if its MMW item is beyond that cap it is wrongly treated as 'not in the project'. Paginate projectItems (or raise PAGE_CAP) if this is ever hit."
@@ -272,7 +263,7 @@ jobs:
                 }' \
               -f projectId="$project_id" -f itemId="$item_id" \
               -f fieldId="$status_field_id" -f optionId="$to_option_id"; then
-              echo "::warning::failed to move #$number to '$TO_STATUS_NAME' (gh's error is above). If EVERY linked issue fails this way, PROJECT_TOKEN likely has Projects: READ but not WRITE."
+              echo "::warning::failed to move #$number to '$TO_STATUS_NAME' (gh's error is above). If EVERY linked issue fails this way, the MMW Automation app likely has organization Projects read but not write."
               failed=1
               continue
             fi

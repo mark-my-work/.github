@@ -1,14 +1,13 @@
 name: Assign issue on branch creation
 
-# When a branch is created following this repo's naming convention
-# (<issue-number>-<kebab-title>, see docs/claude/workflow.md), assign the
+# When a branch is created following the MMW branch naming convention
+# (<issue-number>-<kebab-title>), assign the
 # named issue to whoever created the branch -- whether via `git push`, the
 # GitHub web UI, or the issue's own "Create a branch" link. A branch name
 # with no leading issue number is silently skipped.
 
 on:
-  # Each repository's caller file sets the real trigger and the concurrency group, and
-  # calls this file with `secrets: inherit`. The notes on the trigger are kept here.
+  # Each repository's caller file sets the real trigger, `create`, and calls this file.
   workflow_call:
 
 permissions:

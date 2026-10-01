@@ -5,7 +5,7 @@ title: ''
 ---
 
 <!-- Set the issue TYPE (not a label) to **Task** — a spec-first schema-design item has no UI component.
-     (There is no `enhancement` label in this repo.) -->
+     (There is no `enhancement` label in mark-my-work repositories.) -->
 
 <!-- THE LINE BELOW IS PROSE — IT CREATES NOTHING. "Part of mark-my-work/mmw#91" does not make this a sub-issue of mark-my-work/mmw#91, and
      "Depends on: mark-my-work/mmw#537" does not block anything. Once the issue is open, set the real relationships in its
@@ -73,7 +73,7 @@ erDiagram
 
 ## Constraints
 
-<!-- Split per CLAUDE.md "DB triggers/constraints enforce DATA SELF-CONSISTENCY, NOT business policy". -->
+<!-- Split by the rule: DB triggers/constraints enforce DATA SELF-CONSISTENCY, NOT business policy. -->
 
 - **DB (self-consistency):** references resolve / don't cross entities or form cycles; mutually-exclusive
   representations stay exclusive; a row's columns match its discriminator; uniqueness; native-enum checks.
@@ -97,7 +97,7 @@ Advisory; the plan may adopt, improve, or reject any of it.
 - [ ] Models + migration created (schema-qualified `db_table`; conventions followed).
 - [ ] Native enums created with a frozen snapshot + `makemigrations --check` guard (if any).
 - [ ] DB self-consistency constraints enforced (CHECK / trigger) with tests on the INSERT and UPDATE paths.
-- [ ] App-layer business rules located per CLAUDE.md (not in the DB), or explicitly deferred.
+- [ ] App-layer business rules located in the application (not in the DB), or explicitly deferred.
 - [ ] Cross-stack mirror + contract test (if the model is mirrored to the frontend).
 - [ ] Tests + lint pass.
 

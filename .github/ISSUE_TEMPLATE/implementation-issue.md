@@ -5,7 +5,7 @@ title: ''
 ---
 
 <!-- Set the issue TYPE (not a label): **Feature** if this delivers a user-facing / UI change, or **Task**
-     for a technical to-do with no UI component. (There is no `enhancement` label in this repo.) -->
+     for a technical to-do with no UI component. (There is no `enhancement` label in mark-my-work repositories.) -->
 
 <!-- AUTHORITY OF THE SECTIONS (issue mark-my-work/mmw#418): **Requirements** (+ the cited requirement documents)
      are BINDING — the agreed WHAT. **Implementation Notes** are ADVISORY — suggested HOW, which the plan

@@ -2,9 +2,8 @@ name: Reconcile issue labels
 
 # Keeps Epic, needs-priority and needs-effort correct on every open issue in every private
 # mark-my-work repository; scripts/reconcile-issue-labels.sh states the rules. One job for the
-# whole organization, every 6 hours: GitHub bills each job as a whole minute, and this
-# repository is public, so the run costs no minutes at all. A label may lag reality by up to
-# 6 hours (#778).
+# whole organization, every 6 hours; this repository is public, so the run costs no Actions
+# minutes. A label may lag reality by up to 6 hours (mark-my-work/mmw#778).
 #
 # GH_TOKEN is a one-hour token for the MMW Automation GitHub App, because the job changes
 # labels in repositories other than this one. Its key is why check-triggers.yml keeps every

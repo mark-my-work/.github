@@ -10,11 +10,11 @@ title: ''
      reading correctly. No issue-number prefix. -->
 
 <!-- Set the issue TYPE (not a label): **Feature** if the initiative delivers user-facing capability,
-     **Task** if it is entirely technical. (There is no `enhancement` label in this repo.) -->
+     **Task** if it is entirely technical. (There is no `enhancement` label in mark-my-work repositories.) -->
 
 <!-- LEAVE Priority, Human Effort, Implementation Risk and Milestone BLANK. Those rank shippable work, and
-     an epic's is ranked on its sub-issues. The `Epic` LABEL is applied by reconcile-issue-labels.yml once
-     this has at least one sub-issue; do not add it by hand. Until then that same workflow will flag this
+     an epic's is ranked on its sub-issues. In a private repository, the `Epic` LABEL is applied by
+     reconcile-issue-labels.yml (in mark-my-work/.github) once this has at least one sub-issue; do not add it by hand. Until then that same workflow will flag this
      issue with needs-priority and needs-effort, which is expected and clears when it is decomposed. -->
 
 <!-- AN EPIC IS NOT A BIG IMPLEMENTATION ISSUE. It carries no Requirements, no Acceptance checklist and no

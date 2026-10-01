@@ -5,7 +5,8 @@ The GitHub setup every `mark-my-work` repository shares. The design of record is
 | Path | What it is |
 |---|---|
 | `.github/ISSUE_TEMPLATE/` | the issue templates GitHub offers in every repository without its own |
-| `.github/workflows/assign-branch-issue.yml`, `.github/workflows/mmw-board-*.yml` | the board workflows every repository calls at `@main` from its own caller files |
+| `.github/workflows/mmw-board-*.yml` | the MMW board workflows every repository calls at `@main` from its own caller files |
+| `.github/workflows/assign-branch-issue.yml` | assigns an issue to whoever pushes a branch named for it; every repository calls it at `@main` |
 | `.github/workflows/reconcile-issue-labels.yml` | the label reconcile, run here for every repository |
 | `.github/workflows/verify-authors.yml` | the authorship check the `default-branch` ruleset requires on every pull request |
 | `.github/workflows/check-triggers.yml`, `.github/workflows/test.yml` | the checks the `github-repo-checks` ruleset requires on this repository's pull requests |

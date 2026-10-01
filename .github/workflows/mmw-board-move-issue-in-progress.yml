@@ -10,45 +10,36 @@ name: Move linked issue to In progress (MMW board)
 # this is safe to re-run across a PR's events (idempotent) rather than needing to
 # detect the add/remove transition itself. A card already sitting in a not-started
 # column WITH a status is advanced OUT only on a work-starting event (PR
-# opened/reopened/ready_for_review) -- which since #779 are the ONLY events that reach this
+# opened/reopened/ready_for_review) -- which since mark-my-work/mmw#779 are the ONLY events that reach this
 # workflow, so re-parking a card to Backlog on an in-flight PR isn't undone on the next PUSH.
 # A reopen or a draft->ready flip IS treated as work-starting and WILL re-advance a
 # deliberately re-parked card (accepted trade-off). An item with NO status advances on any of
 # those three events; it is no longer advanced by a push or a body edit, because neither fires.
 # That catch-up was measured unreachable before it was given up: 0 of 555 board cards carried
-# no Status, and every one of the 338 open issues was on the board (#779).
-# KNOWN GAP (won't-fix -- docs-only per the #8 design record): a card auto-added with
+# no Status, and every one of the 338 open issues was on the board (mark-my-work/mmw#779).
+# KNOWN GAP (won't-fix -- docs-only per the mark-my-work/mmw#8 design record): a card auto-added with
 # a non-empty not-started status (e.g. "Todo") on a NON-draft PR, which never fires
 # ready_for_review, has no future work-starting event and stays put until a reopen or
 # a manual nudge; only the draft->ready path self-heals such a card.
 #
-# Needs a PAT stored as the repo secret PROJECT_TOKEN, because the default
-# GITHUB_TOKEN cannot read/write an org-owned Project. Its scopes must cover BOTH
-# the org Project AND this (private) repo's issues, since the move step also reads
-# each linked issue's node id + project item:
-#   - classic PAT: `project` + `repo`, or
-#   - fine-grained PAT: org "Projects: Read and write" + repo "Issues: Read".
+# Authenticates as the MMW Automation GitHub App: its first step gets a one-hour token limited
+# to this repository, with organization Projects read and write and repository Issues read,
+# because the default GITHUB_TOKEN cannot read or write an org-owned Project.
 # The preflight below exercises both READ paths -- it resolves the org Project AND reads
-# this repo's node id with the same PROJECT_TOKEN -- so a token that cannot read either
-# fails HERE with a clear ::error::. (A token that can read the Project but not the
-# repo would otherwise have every linked issue read as NOT_FOUND in the per-issue loop
-# and be SILENTLY SWALLOWED to a green no-op that advances nothing.) It CANNOT prove
-# Projects: WRITE -- there is no no-op mutation -- so a read-only token passes the preflight
-# and instead reddens on the per-issue move below (whose warning names the write scope).
-# When the secret is ABSENT the
-# first step publishes present=false and the two API steps are skipped via their
-# `if:` -- no GraphQL calls, no failure -- so a missing/misconfigured secret degrades
-# cleanly rather than erroring. (#300 tracks sourcing the PAT from AWS Secrets Manager
-# instead of a plain repo secret.) NOTE: under `pull_request_target` (see the trigger note
-# below) Actions DOES expose secrets to fork / Dependabot PRs, so -- unlike a
-# `pull_request`-triggered workflow -- those runs DO get PROJECT_TOKEN and DO advance the
-# board. Harmless here: no PR code is ever checked out or executed.
+# this repo's node id with the same token -- so a token that cannot read either fails HERE
+# with a clear ::error::. (A token that can read the Project but not the repo would
+# otherwise have every linked issue read as NOT_FOUND in the per-issue loop and be
+# SILENTLY SWALLOWED to a green no-op that advances nothing.) It CANNOT prove Projects:
+# WRITE -- there is no no-op mutation -- so a token without it passes the preflight and
+# instead reddens on the per-issue move below (whose warning names the write permission).
+# A repository without the app's key fails at the token step rather than skipping. A run
+# Dependabot triggers gets no Actions secrets, so the job skips Dependabot.
 
 on:
   # Each repository's caller file sets the real trigger and the concurrency group, and
   # calls this file with `secrets: inherit`. The notes on the trigger are kept here.
   # `pull_request_target`, NOT `pull_request` -- deliberate, and load-bearing (mirrors
-  # move-issue-in-review.yml; see that file's trigger note for the full story).
+  # mmw-board-move-issue-in-review.yml; see that file's trigger note for the full story).
   #
   # GitHub schedules a `pull_request` run against the PR's MERGE COMMIT (refs/pull/<n>/merge),
   # which it CANNOT compute while the PR has a merge conflict -- per the Actions docs,
@@ -56,25 +47,26 @@ on:
   # conflict." That suppression covers EVERY activity type above, not just one: while a PR is
   # conflicted this workflow gets NOTHING. It matters most for the three WORK-STARTING events
   # (opened/reopened/ready_for_review), because they are the only ones that advance a card
-  # carrying a not-started status -- and since #779 they are also the only events this workflow
+  # carrying a not-started status -- and since mark-my-work/mmw#779 they are also the only events this workflow
   # receives. So a PR opened while conflicted, or a re-parked card whose draft->ready
   # flip landed while conflicted, would silently never advance and never self-heal -- no run,
-  # no red X. (The same drop stranded issue #265 on its sibling; see move-issue-in-review.yml.)
+  # no red X. (The same drop stranded issue mark-my-work/mmw#265 on its sibling; see mmw-board-move-issue-in-review.yml.)
   #
   # `pull_request_target` runs in the context of the BASE branch rather than the merge commit,
   # so it needs no merge ref and is scheduled regardless of mergeability -- closing the gap
   # with NO change to the trigger set or to which events advance what.
   #
-  # SAFE because this workflow NEVER checks out or runs PR code (it has no `uses:` steps at
-  # all): it only issues `gh api` calls keyed on the PR NUMBER and `github.event.action`; no PR
+  # SAFE because this workflow NEVER checks out or runs PR code (its only `uses:` step is
+  # GitHub's own actions/create-github-app-token, which checks out nothing): it only issues `gh api` calls keyed on the PR NUMBER and `github.event.action`; no PR
   # title / body / branch name is ever interpolated into a shell command. A future step that
   # checks out the PR head would REINTRODUCE the untrusted-code hazard.
-  # NOTE: the workflow file is read from the BASE branch, so edits here only take effect once
-  # merged to main (and cannot be tampered with from a PR branch -- a further win).
-    # synchronize and edited were DROPPED (issue #779). The job rejected both anyway -- see the
-    # EVENT_ACTION guard below -- but it rejected them AFTER allocating a runner, and GitHub
-    # bills each job rounded up to a whole minute: 580 runs and 680 billed minutes in August
-    # 2026 against 29 PRs opened, for jobs whose mean runtime is about 7 seconds.
+  # NOTE: the caller file is read from the calling repository's BASE branch, and it calls this
+  # file at mark-my-work/.github@main, so an edit here takes effect in every repository once
+  # merged to .github's main, and a pull request in a calling repository cannot change it.
+  # The caller's trigger types leave out synchronize and edited (mark-my-work/mmw#779). The
+  # job rejected both anyway -- see the EVENT_ACTION guard below -- but only after allocating
+  # a runner, and GitHub bills each job rounded up to a whole minute: 580 runs and 680 billed
+  # minutes in August 2026 against 29 PRs opened in mmw, for jobs that ran about 7 seconds.
   workflow_call:
 
 permissions:
@@ -88,7 +80,7 @@ permissions:
 # redundant/racing moves. `cancel-in-progress: false` lets the CURRENT run finish
 # rather than cancelling it. NOTE the asymmetry it does NOT fix: GitHub keeps only ONE
 # PENDING run per group, so when a newer event queues it CANCELS the older pending run
-# (this flag governs the in-progress run, NOT the pending one). Since #779 dropped
+# (this flag governs the in-progress run, NOT the pending one). Since mark-my-work/mmw#779 dropped
 # synchronize and edited, the FREQUENT source of that cancellation is gone: a pending
 # work-starting run can now only be superseded by ANOTHER work-starting event, which is
 # rare (an open, a reopen and a ready-for-review landing within one run of each other).
@@ -102,7 +94,7 @@ env:
   # org-level "MMW" project. The Status field and its "In progress" option are
   # resolved BY NAME at run time (see the preflight below), so recreating the
   # field/option self-heals instead of chasing stale hardcoded ids. The project
-  # itself is still targeted by its fixed number (#2) -- a recreated board gets a new
+  # itself is still targeted by its fixed number (mark-my-work/mmw#2) -- a recreated board gets a new
   # number and would need this updated.
   #
   # The set of "not-started" columns an item is advanced OUT of is NOT hardcoded: it is
@@ -128,6 +120,8 @@ env:
 
 jobs:
   move-linked-issues:
+    # A run Dependabot triggers gets no Actions secrets, so the token step would fail it.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     env:
       OWNER: ${{ github.repository_owner }}
@@ -139,7 +133,8 @@ jobs:
       # repeated at four sites). Passed into each query as the `$first` Int variable.
       PAGE_CAP: 100
     steps:
-      # A one-hour token for the MMW Automation GitHub App (D14 of mmw's plan 876). A repository
+      # A one-hour token for the MMW Automation GitHub App (D14 of mark-my-work/mmw's plan 876),
+      # limited to this repository and to the permissions this workflow uses. A repository
       # without the app's key fails here, loudly, rather than skipping.
       - name: Get a token for the MMW Automation app
         id: app-token
@@ -148,27 +143,11 @@ jobs:
           client-id: ${{ vars.MMW_AUTOMATION_CLIENT_ID }}
           private-key: ${{ secrets.MMW_AUTOMATION_PRIVATE_KEY }}
           owner: mark-my-work
-      # A secret can't be read in an `if:` directly, and a job-level `if:` can't see
-      # env/secrets at all, so gate on a step OUTPUT instead: read PROJECT_TOKEN into
-      # a step-level env (unambiguously allowed), publish present=true/false, and skip
-      # the two API steps below when it's absent -- so a missing secret does zero
-      # GraphQL work rather than a query-then-warn per PR event.
-      - name: Check the PROJECT_TOKEN secret is available
-        id: token
-        env:
-          PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -uo pipefail
-          if [ -n "${PROJECT_TOKEN:-}" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "PROJECT_TOKEN is not available -- skipping the project Status move: the PAT secret is missing or misconfigured, so the board can't be advanced for this PR."
-          fi
-
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: read
+          permission-organization-projects: write
       - name: Find issues this PR will close
         id: linked
-        if: steps.token.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -231,9 +210,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Move each linked issue to "In progress" if it hasn't started
-        # `linked` emits `numbers` only on its success path and is itself gated on the token
-        # being present, so a non-empty `numbers` already implies token-present -- no need to
-        # re-check steps.token.outputs.present here.
+        # `linked` emits `numbers` only on its success path.
         if: steps.linked.outputs.numbers != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -244,10 +221,10 @@ jobs:
 
           # Fail-fast preflight: one query resolves the project's node id, its Status
           # field id, and the "In progress" option id BY NAME, AND reads THIS repo's node
-          # id with the SAME PROJECT_TOKEN. It catches an empty/expired PROJECT_TOKEN, a
+          # id with the SAME app token. It catches an expired app token, a
           # token lacking the org-Project scope, a renamed/recreated board, OR -- via the
           # `repository { id }` selection -- a token that can read the Project but CANNOT
-          # see this (private) repo. That last case is why the repo read is here: without
+          # see the calling repository. That last case is why the repo read is here: without
           # it, the token's repo blindness surfaces only per-issue in the loop below as a
           # NOT_FOUND (which the loop SWALLOWS as "deleted/transferred"), turning a
           # misconfigured token into a green no-op that advances nothing. A token missing
@@ -271,7 +248,7 @@ jobs:
                 }
                 repository(owner: $org, name: $repo) { id }
               }' -f org="$OWNER" -f repo="$REPO" -F number="$PROJECT_NUMBER" -f statusField="$STATUS_FIELD_NAME"); then
-            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER or the '$OWNER/$REPO' repository with PROJECT_TOKEN. Is the PAT valid and granted BOTH org Projects read AND access to this repo? (classic PAT: 'project' + 'repo'; fine-grained: org 'Projects: Read and write' + repo 'Issues: Read'.) gh's error is above."
+            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER or the '$OWNER/$REPO' repository with the MMW Automation app token. Is the app installed on '$OWNER/$REPO', with organization Projects read and write and repository Issues read? gh's error is above."
             exit 1
           fi
 
@@ -308,7 +285,7 @@ jobs:
           # if GitHub ever returned repository:null WITHOUT an error, a null repo_id still
           # fails HERE loudly rather than letting the per-issue NOT_FOUND swallow green.
           if [ -z "$repo_id" ]; then
-            echo "::error::PROJECT_TOKEN resolved the org project but CANNOT see '$OWNER/$REPO' -- it is missing repo access (classic PAT: add 'repo'; fine-grained PAT: grant this repo 'Issues: Read'). Without it every linked issue reads as NOT_FOUND and no card would be advanced."
+            echo "::error::The MMW Automation app token resolved the org project but CANNOT see '$OWNER/$REPO' -- the app is not installed on it, or lacks repository Issues read. Without it every linked issue reads as NOT_FOUND and no card would be advanced."
             exit 1
           fi
 
@@ -438,7 +415,7 @@ jobs:
               fi
               # The item is currently in a not-started column. Advance it OUT only on a
               # work-STARTING event (PR opened, reopened, or flipped to ready_for_review).
-              # Since #779 synchronize and edited no longer reach this workflow at all, so
+              # Since mark-my-work/mmw#779 synchronize and edited no longer reach this workflow at all, so
               # this guard is belt-and-braces: it keeps the RULE stated where it is enforced,
               # so re-adding a trigger type cannot silently drop the protection. It reads: do
               # NOT re-advance a card already sitting in
@@ -451,19 +428,19 @@ jobs:
               # re-advance a deliberately re-parked card -- an accepted trade-off, because
               # ready_for_review is also what lets a card AUTO-ADDED with a non-empty status
               # (or LINKED by a later body edit) after the opened run finally converge. That
-              # second case matters MORE since #779: a body edit adding `Closes #N` no longer
+              # second case matters MORE since mark-my-work/mmw#779: a body edit adding `Closes #N` no longer
               # fires this workflow at all, so the draft->ready flip is now the only thing
               # that advances a late-linked issue. TWO KNOWN GAPS (won't-fix, docs-only per
-              # the #8 design record): (a) a non-empty not-started card on a NON-draft PR
+              # the mark-my-work/mmw#8 design record): (a) a non-empty not-started card on a NON-draft PR
               # never gets a ready_for_review event, so it stays put until a reopen/manual
               # nudge; (b) a card whose status was CLEARED to empty (rather than moved to a
               # named column) falls through the `[ -n "$status" ]` guard above and is
               # advanced on any event that reaches this workflow -- so clearing-to-empty is
-              # still NOT a protected re-park, though since #779 that means only the three
+              # still NOT a protected re-park, though since mark-my-work/mmw#779 that means only the three
               # work-starting events rather than every push. An item with NO status yet
               # behaves the same way.
               if [ "$EVENT_ACTION" != "opened" ] && [ "$EVENT_ACTION" != "reopened" ] && [ "$EVENT_ACTION" != "ready_for_review" ]; then
-                echo "Issue #$number is in '$status' on a '$EVENT_ACTION' event -- leaving as-is (a not-started card is advanced only on PR open/reopen/ready-for-review). Since #779 no other event reaches this workflow, so this line should be unreachable; seeing it means the trigger set was widened without revisiting this guard."
+                echo "Issue #$number is in '$status' on a '$EVENT_ACTION' event -- leaving as-is (a not-started card is advanced only on PR open/reopen/ready-for-review). Since mark-my-work/mmw#779 no other event reaches this workflow, so this line should be unreachable; seeing it means the trigger set was widened without revisiting this guard."
                 continue
               fi
             fi
@@ -482,7 +459,7 @@ jobs:
                 }' \
               -f projectId="$project_id" -f itemId="$item_id" \
               -f fieldId="$status_field_id" -f optionId="$in_progress_option_id"; then
-              echo "::warning::failed to move #$number to In progress (gh's error is above). If EVERY linked issue fails this way, PROJECT_TOKEN likely has Projects: READ but not WRITE -- the preflight only proves read access; the mutation needs 'Projects: Read and write' (fine-grained) / 'project' (classic)."
+              echo "::warning::failed to move #$number to In progress (gh's error is above). If EVERY linked issue fails this way, the MMW Automation app likely has organization Projects read but not write -- the preflight only proves read access."
               failed=1
               continue
             fi

@@ -1,7 +1,7 @@
 name: Update the board on a PR review (MMW board)
 
 # When a reviewer SUBMITS a review, keep two cards on the org-level "MMW" Project (v2, #2)
-# honest (issue #399 §4):
+# honest (issue mark-my-work/mmw#399 §4):
 #
 #   1. The PR's OWN Status -> "In progress" (reviewing). Any submitted review means review is
 #      underway. Advanced ONLY from "Ready for work" (the ready-but-not-yet-reviewed column) --
@@ -10,13 +10,13 @@ name: Update the board on a PR review (MMW board)
 #   2. On "changes requested" only: the linked ISSUE(s) -> "In progress" (from "In review").
 #      This is what keeps the IMPLEMENTER's board honest through the fix cycle without any PR
 #      reassignment: the PR stays the reviewer's, while the implementer's fix-work shows as the
-#      issue cycling In review <-> In progress (the near-mirror of move-issue-in-review.yml,
+#      issue cycling In review <-> In progress (the near-mirror of mmw-board-move-issue-in-review.yml,
 #      reversed). Guarded to advance an issue ONLY from exactly "In review".
 #
-# Needs the same PROJECT_TOKEN PAT as the move-issue-* workflows, but with ONE ADDED SCOPE: it
-# reads the PR's project item via `repository.pullRequest(...)`, so the PAT needs `Pull requests:
-# Read` in ADDITION to `Issues: Read` + org Projects (a classic repo+project PAT already covers
-# it; a fine-grained PAT must add it). Skips cleanly when the secret is absent.
+# Authenticates as the MMW Automation GitHub App: a one-hour token limited to this repository,
+# with organization Projects read and write and Issues and Pull requests read. A repository
+# without the app's key fails at the token step rather than skipping; a run Dependabot
+# triggers gets no Actions secrets, so the job skips Dependabot.
 
 on:
   # Each repository's caller file sets the real trigger and the concurrency group, and
@@ -26,7 +26,7 @@ on:
   # `pull_request_review` run may be suppressed by GitHub while the PR has a MERGE CONFLICT
   # (the merge commit can't be computed). So a review submitted on a conflicted PR may not move
   # the cards until the conflict is resolved and a later event fires. This is the same
-  # suppression documented for the move-issue-* siblings, but here it cannot be dodged with a
+  # suppression documented for the mmw-board-move-issue-* siblings, but here it cannot be dodged with a
   # `_target` variant because none exists. Bounded and self-correcting (the next review/lifecycle
   # event on the un-conflicted PR moves the cards), and it fails safe (a card merely lags, never
   # lands wrong). SAFE otherwise: this workflow never checks out or runs PR code -- it issues
@@ -39,11 +39,11 @@ permissions:
 
 # CONCURRENCY is set by each caller file, so the group holds within the calling
 # repository; the notes on it are kept here, beside the logic they protect.
-# Serialize per PR in a group SHARED with set-pr-status.yml (both `pr-board-<n>`) so a review
+# Serialize per PR in a group SHARED with mmw-board-set-pr-status.yml (both `pr-board-<n>`) so a review
 # event and a lifecycle event can't race the same PR card to conflicting values. Several
 # reviewers submitting near-simultaneously are serialized by the same group.
 #
-# ACCEPTED GAP (won't-fix; the same pending-run asymmetry move-issue-in-progress.yml documents):
+# ACCEPTED GAP (won't-fix; the same pending-run asymmetry mmw-board-move-issue-in-progress.yml documents):
 # GitHub keeps only ONE pending run per group and cancels the older pending run when a newer one
 # queues (cancel-in-progress governs the IN-PROGRESS run, not the pending one). Because the group
 # is shared, a still-PENDING pull_request_review run can be cancelled by a newer same-group
@@ -62,6 +62,8 @@ env:
 
 jobs:
   update-on-review:
+    # A run Dependabot triggers gets no Actions secrets, so the token step would fail it.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     env:
       OWNER: ${{ github.repository_owner }}
@@ -70,7 +72,8 @@ jobs:
       REVIEW_STATE: ${{ github.event.review.state }}
       PAGE_CAP: 100
     steps:
-      # A one-hour token for the MMW Automation GitHub App (D14 of mmw's plan 876). A repository
+      # A one-hour token for the MMW Automation GitHub App (D14 of mark-my-work/mmw's plan 876),
+      # limited to this repository and to the permissions this workflow uses. A repository
       # without the app's key fails here, loudly, rather than skipping.
       - name: Get a token for the MMW Automation app
         id: app-token
@@ -79,21 +82,11 @@ jobs:
           client-id: ${{ vars.MMW_AUTOMATION_CLIENT_ID }}
           private-key: ${{ secrets.MMW_AUTOMATION_PRIVATE_KEY }}
           owner: mark-my-work
-      - name: Check the PROJECT_TOKEN secret is available
-        id: token
-        env:
-          PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -uo pipefail
-          if [ -n "${PROJECT_TOKEN:-}" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "PROJECT_TOKEN is not available -- skipping the review board update. The PAT secret is unset. (Unlike a plain \`pull_request\` workflow, \`pull_request_review\` runs in the base-repo context and DOES receive secrets on fork / Dependabot PRs, so this branch means the secret is genuinely absent, not a fork.)"
-          fi
-
+          repositories: ${{ github.event.repository.name }}
+          permission-issues: read
+          permission-pull-requests: read
+          permission-organization-projects: write
       - name: Move the PR (and, on changes-requested, its issues) forward
-        if: steps.token.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -102,9 +95,9 @@ jobs:
           echo "PR #$PR_NUMBER review submitted with state '$REVIEW_STATE'."
 
           # Preflight: project id, Status field id, the three option ids we may need (by name),
-          # and this repo's node id -- all with PROJECT_TOKEN.
-          # The preflight ALSO reads `pullRequest(number:){ id }` so a PROJECT_TOKEN missing the NEW
-          # `Pull requests: Read` scope this workflow needs fails HERE (naming the scope) instead of
+          # and this repo's node id -- all with the app token.
+          # The preflight ALSO reads `pullRequest(number:){ id }` so an app token missing the
+          # Pull requests read permission this workflow needs fails HERE (naming it) instead of
           # later at the PR/closing-refs reads with a generic error.
           if ! project_json=$(gh api graphql -f query='
               query($org: String!, $repo: String!, $number: Int!, $statusField: String!, $pr: Int!) {
@@ -118,7 +111,7 @@ jobs:
                 }
                 repository(owner: $org, name: $repo) { id pullRequest(number: $pr) { id } }
               }' -f org="$OWNER" -f repo="$REPO" -F number="$PROJECT_NUMBER" -f statusField="$STATUS_FIELD_NAME" -F pr="$PR_NUMBER"); then
-            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER, the '$OWNER/$REPO' repository, or PR #$PR_NUMBER with PROJECT_TOKEN (valid PAT with org Projects + repo access + the 'Pull requests: Read' scope this workflow adds?). gh's error is above."
+            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER, the '$OWNER/$REPO' repository, or PR #$PR_NUMBER with the MMW Automation app token. Is the app installed on '$OWNER/$REPO', with organization Projects read and write and Issues and Pull requests read? gh's error is above."
             exit 1
           fi
 
@@ -126,7 +119,7 @@ jobs:
           # ("Ready for work" / "In review") purely as fail-loud CANARIES: the guards below compare
           # status NAMES, so a rename of a guard column would otherwise SILENTLY disable the effect.
           # Resolving + non-empty-validating them here makes such a rename fail loud (matching
-          # move-issue-in-review.yml, which validates its FROM option though it only writes the TO
+          # mmw-board-move-issue-in-review.yml, which validates its FROM option though it only writes the TO
           # option). Also capture the PR node id for the scope check below.
           mapfile -t preflight < <(jq -r --arg inprog "$IN_PROGRESS_STATUS_NAME" --arg ready "$READY_STATUS_NAME" --arg inreview "$IN_REVIEW_STATUS_NAME" '
             .data as $d
@@ -152,11 +145,11 @@ jobs:
             exit 1
           fi
           if [ -z "$repo_id" ]; then
-            echo "::error::PROJECT_TOKEN resolved the org project but CANNOT see '$OWNER/$REPO' -- missing repo access; PR/issue items would read as NOT_FOUND."
+            echo "::error::The MMW Automation app token resolved the org project but CANNOT see '$OWNER/$REPO' -- the app is not installed on it; PR/issue items would read as NOT_FOUND."
             exit 1
           fi
           if [ -z "$pr_node_id" ]; then
-            echo "::error::PROJECT_TOKEN can see '$OWNER/$REPO' but NOT PR #$PR_NUMBER -- the PAT is missing 'Pull requests: Read' (this workflow reads the PR's project item + its closing refs). Without it the reads below fail."
+            echo "::error::The MMW Automation app token can see '$OWNER/$REPO' but NOT PR #$PR_NUMBER -- the app lacks Pull requests read (this workflow reads the PR's project item + its closing refs). Without it the reads below fail."
             exit 1
           fi
 
@@ -201,8 +194,8 @@ jobs:
                 echo "::warning::PR #$PR_NUMBER is in $pr_projects_total projects but only the first $PAGE_CAP are read -- its MMW item may be beyond that cap and wrongly read as 'not on the board'."
               fi
               echo "PR #$PR_NUMBER is not on the MMW board yet -- not setting its Status."
-            # KNOWN GAP (PLAUSIBLE, issue #399 review cycle 2): this advances ONLY from an exact
-            # "Ready for work". So a PR opened DIRECTLY non-draft that lost set-pr-status.yml's
+            # KNOWN GAP (PLAUSIBLE, issue mark-my-work/mmw#399 review cycle 2): this advances ONLY from an exact
+            # "Ready for work". So a PR opened DIRECTLY non-draft that lost mmw-board-set-pr-status.yml's
             # auto-add race (its card stranded in the auto-add default column with empty/other
             # status, with no future lifecycle event to fix it -- that workflow's documented gap)
             # can NEVER be rescued by a review: the guard skips any non-"Ready for work" status, so
@@ -222,25 +215,25 @@ jobs:
           fi
 
           # ---- Effect 2: on changes_requested only, linked issues In review -> In progress. ----
-          # KNOWN GAP (deliberate, issue #399 review cycle 2): this In review->In progress move has
+          # KNOWN GAP (deliberate, issue mark-my-work/mmw#399 review cycle 2): this In review->In progress move has
           # no automated inverse on a normal fix cycle. After changes are requested, the implementer
           # usually just pushes fixes (synchronize -- no board event) and re-requests review, which
-          # never re-fires move-issue-in-review.yml's one-shot ready_for_review, so the issue stays
+          # never re-fires mmw-board-move-issue-in-review.yml's one-shot ready_for_review, so the issue stays
           # "In progress" through re-review and goes straight to Done on merge, never re-showing
           # "In review". Accepted (kept minimal) rather than triggering on review_requested, which
           # also fires on initial/draft review requests and would move issues to "In review"
           # prematurely. Re-flip draft->ready to force the issue back to "In review" if needed.
           #
-          # ACCEPTED RACE (PLAUSIBLE, issue #399 review cycle 2): these issue-card writes are NOT
-          # serialized against move-issue-in-review.yml, which writes the SAME issue card under its
+          # ACCEPTED RACE (PLAUSIBLE, issue mark-my-work/mmw#399 review cycle 2): these issue-card writes are NOT
+          # serialized against mmw-board-move-issue-in-review.yml, which writes the SAME issue card under its
           # own concurrency group (move-issue-in-review-<n>) -- the shared pr-board-<n> group guards
           # only the PR card. So a near-simultaneous ready_for_review (In progress->In review) and
           # changes_requested (this In review->In progress) can interleave: if this run reads the
           # issue as "In progress" before the other's write, its guard skips and the issue lands at
           # "In review" though changes were requested. Narrow window; fails safe (wrong-but-valid
           # column, never corrupt). The only real fix is putting ALL issue-card writers under one
-          # shared group (a cross-workflow change spanning both move-issue-* workflows), left out of
-          # scope here. NOTE: this is also why set-pr-status.yml stays PR-only -- adding a third
+          # shared group (a cross-workflow change spanning both mmw-board-move-issue-* workflows), left out of
+          # scope here. NOTE: this is also why mmw-board-set-pr-status.yml stays PR-only -- adding a third
           # unsynchronized issue-card writer would widen this collision.
           if [ "$REVIEW_STATE" = "changes_requested" ]; then
             if ! refs_json=$(gh api graphql -f query='
