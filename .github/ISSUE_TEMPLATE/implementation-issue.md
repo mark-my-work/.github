@@ -34,7 +34,9 @@ Part of #<epic> · Depends on: #<a>, #<b> · Design: <link to the design documen
 <!-- What exactly is built: behavior, business rules, constraints, data shapes, error handling.
      Include where they apply:
        - observability: the OTEL span/attributes + Sentry on failure, with NO PII/content in telemetry
-       - i18n: frontend user-facing strings via en.json (N/A for backend-only issues) -->
+       - i18n: frontend user-facing strings via en.json (N/A for backend-only issues)
+       - e2e: Playwright end-to-end tests for a new page
+       - cross-page linking: a list row naming an entity with its own list page links there -->
 
 <!-- Out of scope: ... (optional — bound the work) -->
 
