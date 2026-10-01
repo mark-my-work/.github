@@ -1,0 +1,495 @@
+name: Move linked issue to In progress (MMW board)
+
+# When a PR's description carries a closing reference (Closes/Fixes/Resolves
+# #<n>, surfaced via GraphQL as closingIssuesReferences -- the same relationship
+# shown in the issue/PR "Development" sidebar), move each linked issue's Status
+# in the org-level "MMW" Project (v2, #2) from a not-started column (any column
+# before "In progress" in board order -- Backlog/Ready for work/Todo -- or unset) to
+# "In progress". Any other Status (already In progress,
+# In review, Done) or an issue not yet added to the project is left alone, so
+# this is safe to re-run across a PR's events (idempotent) rather than needing to
+# detect the add/remove transition itself. A card already sitting in a not-started
+# column WITH a status is advanced OUT only on a work-starting event (PR
+# opened/reopened/ready_for_review) -- which since #779 are the ONLY events that reach this
+# workflow, so re-parking a card to Backlog on an in-flight PR isn't undone on the next PUSH.
+# A reopen or a draft->ready flip IS treated as work-starting and WILL re-advance a
+# deliberately re-parked card (accepted trade-off). An item with NO status advances on any of
+# those three events; it is no longer advanced by a push or a body edit, because neither fires.
+# That catch-up was measured unreachable before it was given up: 0 of 555 board cards carried
+# no Status, and every one of the 338 open issues was on the board (#779).
+# KNOWN GAP (won't-fix -- docs-only per the #8 design record): a card auto-added with
+# a non-empty not-started status (e.g. "Todo") on a NON-draft PR, which never fires
+# ready_for_review, has no future work-starting event and stays put until a reopen or
+# a manual nudge; only the draft->ready path self-heals such a card.
+#
+# Needs a PAT stored as the repo secret PROJECT_TOKEN, because the default
+# GITHUB_TOKEN cannot read/write an org-owned Project. Its scopes must cover BOTH
+# the org Project AND this (private) repo's issues, since the move step also reads
+# each linked issue's node id + project item:
+#   - classic PAT: `project` + `repo`, or
+#   - fine-grained PAT: org "Projects: Read and write" + repo "Issues: Read".
+# The preflight below exercises both READ paths -- it resolves the org Project AND reads
+# this repo's node id with the same PROJECT_TOKEN -- so a token that cannot read either
+# fails HERE with a clear ::error::. (A token that can read the Project but not the
+# repo would otherwise have every linked issue read as NOT_FOUND in the per-issue loop
+# and be SILENTLY SWALLOWED to a green no-op that advances nothing.) It CANNOT prove
+# Projects: WRITE -- there is no no-op mutation -- so a read-only token passes the preflight
+# and instead reddens on the per-issue move below (whose warning names the write scope).
+# When the secret is ABSENT the
+# first step publishes present=false and the two API steps are skipped via their
+# `if:` -- no GraphQL calls, no failure -- so a missing/misconfigured secret degrades
+# cleanly rather than erroring. (#300 tracks sourcing the PAT from AWS Secrets Manager
+# instead of a plain repo secret.) NOTE: under `pull_request_target` (see the trigger note
+# below) Actions DOES expose secrets to fork / Dependabot PRs, so -- unlike a
+# `pull_request`-triggered workflow -- those runs DO get PROJECT_TOKEN and DO advance the
+# board. Harmless here: no PR code is ever checked out or executed.
+
+on:
+  # Each repository's caller file sets the real trigger and the concurrency group, and
+  # calls this file with `secrets: inherit`. The notes on the trigger are kept here.
+  # `pull_request_target`, NOT `pull_request` -- deliberate, and load-bearing (mirrors
+  # move-issue-in-review.yml; see that file's trigger note for the full story).
+  #
+  # GitHub schedules a `pull_request` run against the PR's MERGE COMMIT (refs/pull/<n>/merge),
+  # which it CANNOT compute while the PR has a merge conflict -- per the Actions docs,
+  # "Workflows will not run on `pull_request` activity if the pull request has a merge
+  # conflict." That suppression covers EVERY activity type above, not just one: while a PR is
+  # conflicted this workflow gets NOTHING. It matters most for the three WORK-STARTING events
+  # (opened/reopened/ready_for_review), because they are the only ones that advance a card
+  # carrying a not-started status -- and since #779 they are also the only events this workflow
+  # receives. So a PR opened while conflicted, or a re-parked card whose draft->ready
+  # flip landed while conflicted, would silently never advance and never self-heal -- no run,
+  # no red X. (The same drop stranded issue #265 on its sibling; see move-issue-in-review.yml.)
+  #
+  # `pull_request_target` runs in the context of the BASE branch rather than the merge commit,
+  # so it needs no merge ref and is scheduled regardless of mergeability -- closing the gap
+  # with NO change to the trigger set or to which events advance what.
+  #
+  # SAFE because this workflow NEVER checks out or runs PR code (it has no `uses:` steps at
+  # all): it only issues `gh api` calls keyed on the PR NUMBER and `github.event.action`; no PR
+  # title / body / branch name is ever interpolated into a shell command. A future step that
+  # checks out the PR head would REINTRODUCE the untrusted-code hazard.
+  # NOTE: the workflow file is read from the BASE branch, so edits here only take effect once
+  # merged to main (and cannot be tampered with from a PR branch -- a further win).
+    # synchronize and edited were DROPPED (issue #779). The job rejected both anyway -- see the
+    # EVENT_ACTION guard below -- but it rejected them AFTER allocating a runner, and GitHub
+    # bills each job rounded up to a whole minute: 580 runs and 680 billed minutes in August
+    # 2026 against 29 PRs opened, for jobs whose mean runtime is about 7 seconds.
+  workflow_call:
+
+permissions:
+  pull-requests: read
+  issues: read
+
+# CONCURRENCY is set by each caller file, so the group holds within the calling
+# repository; the notes on it are kept here, beside the logic they protect.
+# Serialize runs for the SAME PR so near-simultaneous events (an open followed at once by
+# a draft->ready flip) don't run the read-Status-then-write concurrently and issue
+# redundant/racing moves. `cancel-in-progress: false` lets the CURRENT run finish
+# rather than cancelling it. NOTE the asymmetry it does NOT fix: GitHub keeps only ONE
+# PENDING run per group, so when a newer event queues it CANCELS the older pending run
+# (this flag governs the in-progress run, NOT the pending one). Since #779 dropped
+# synchronize and edited, the FREQUENT source of that cancellation is gone: a pending
+# work-starting run can now only be superseded by ANOTHER work-starting event, which is
+# rare (an open, a reopen and a ready-for-review landing within one run of each other).
+# Narrowing the triggers therefore CLOSED a real gap as well as cutting the cost -- a
+# trailing push could previously cancel a pending ready_for_review and lose that advance
+# entirely (the move is idempotent, so nothing was corrupted -- only that advance lost). The sub-second window against an OUT-OF-BAND status
+# change by a human editor between this run's read and write is likewise inherent and
+# accepted -- it can't be locked from here.
+
+env:
+  # org-level "MMW" project. The Status field and its "In progress" option are
+  # resolved BY NAME at run time (see the preflight below), so recreating the
+  # field/option self-heals instead of chasing stale hardcoded ids. The project
+  # itself is still targeted by its fixed number (#2) -- a recreated board gets a new
+  # number and would need this updated.
+  #
+  # The set of "not-started" columns an item is advanced OUT of is NOT hardcoded: it is
+  # DERIVED at run time as every Status option positioned BEFORE "In progress" in the
+  # board's own column order (the preflight reads the ordered options). So any pre-start
+  # column -- Backlog, Ready for work, AND any DEFAULT auto-add column such as GitHub's
+  # built-in "Todo" -- is covered automatically, and renaming/adding/reordering a
+  # pre-start column self-heals with no config change. (This intentionally assumes the
+  # board is ordered left-to-right by progress, the GitHub default: everything left of
+  # "In progress" is not-yet-started; "In progress" and everything to its right is a
+  # deliberate later state and is left untouched.)
+  PROJECT_NUMBER: 2
+  STATUS_FIELD_NAME: Status
+  IN_PROGRESS_OPTION_NAME: In progress
+  # Best-effort ORDERING sanity check (a rename fails loud, but a mid-board REORDER does
+  # not). Deriving the not-started set from column order silently mis-classes a
+  # later/started column dragged BEFORE "In progress" -- its cards would then be yanked
+  # back to "In progress". We can't know which columns are "later" without semantics, so
+  # this is a heuristic list of names that are almost always a started/terminal state; if
+  # any appears BEFORE "In progress" the move step emits a WARNING (never blocks). Tune it
+  # to the board's later columns; the general reorder case still can't be fully detected.
+  STARTED_STATUS_NAMES: 'In review,In Review,In Progress,Done,Closed,Cancelled,Canceled'
+
+jobs:
+  move-linked-issues:
+    runs-on: ubuntu-latest
+    env:
+      OWNER: ${{ github.repository_owner }}
+      REPO: ${{ github.event.repository.name }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      # Single source for the unpaginated GraphQL page size AND its matching
+      # truncation-warning threshold, shared by both API steps -- so the query cap
+      # and the `-gt` guard can never drift apart (they used to be a magic `100`
+      # repeated at four sites). Passed into each query as the `$first` Int variable.
+      PAGE_CAP: 100
+    steps:
+      # A one-hour token for the MMW Automation GitHub App (D14 of mmw's plan 876). A repository
+      # without the app's key fails here, loudly, rather than skipping.
+      - name: Get a token for the MMW Automation app
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.MMW_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.MMW_AUTOMATION_PRIVATE_KEY }}
+          owner: mark-my-work
+      # A secret can't be read in an `if:` directly, and a job-level `if:` can't see
+      # env/secrets at all, so gate on a step OUTPUT instead: read PROJECT_TOKEN into
+      # a step-level env (unambiguously allowed), publish present=true/false, and skip
+      # the two API steps below when it's absent -- so a missing secret does zero
+      # GraphQL work rather than a query-then-warn per PR event.
+      - name: Check the PROJECT_TOKEN secret is available
+        id: token
+        env:
+          PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -uo pipefail
+          if [ -n "${PROJECT_TOKEN:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "PROJECT_TOKEN is not available -- skipping the project Status move: the PAT secret is missing or misconfigured, so the board can't be advanced for this PR."
+          fi
+
+      - name: Find issues this PR will close
+        id: linked
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # closingIssuesReferences can carry a CROSS-repo link (`Closes owner/other#n`),
+          # so also read each reference's repository and keep only refs in THIS repo (the
+          # jq filter below) -- otherwise the move step (which resolves the number against
+          # THIS repo) could advance an unrelated same-numbered local issue for a ref that
+          # actually targets another repo. On a query FAILURE, REDDEN the job (exit 1)
+          # rather than degrading to an empty set: swallowing it to green would make a
+          # PERSISTENT cause (e.g. a caller stub missing `pull-requests: read`)
+          # indistinguishable from "this PR closes nothing", silently disabling the
+          # automation forever. A merely TRANSIENT error reddens one run and self-heals on
+          # the next PR event (opened/reopened/ready_for_review) or a
+          # manual job re-run -- consistent with the per-issue move loop below, which also
+          # reddens rather than swallowing.
+          if ! refs_json=$(gh api graphql -f query='
+              query($owner: String!, $repo: String!, $pr: Int!, $first: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $pr) {
+                    closingIssuesReferences(first: $first) {
+                      totalCount
+                      nodes { number repository { owner { login } name } }
+                    }
+                  }
+                }
+              }' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -F first="$PAGE_CAP"); then
+            echo "::error::could not read closing issue references for PR #$PR_NUMBER (gh's error is above). Failing the job so a persistent cause (e.g. a missing pull-requests:read scope) is visible instead of silently masked as 'no linked issues'; a transient error self-heals on the next PR event or a job re-run."
+            exit 1
+          fi
+
+          # Warn on silent truncation: closingIssuesReferences is capped at first:100 and
+          # not paginated, so a PR closing >100 issues would drop the overflow with no
+          # error and leave those issues un-advanced. Rare, but surfaced rather than hidden
+          # -- symmetric with the Epic reconcile's scan-cap warning in reconcile-issue-labels.yml.
+          total_refs=$(jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount // 0' <<<"$refs_json")
+          if [ "$total_refs" -gt "$PAGE_CAP" ]; then
+            echo "::warning::PR #$PR_NUMBER has $total_refs closing references but only the first $PAGE_CAP are read -- issues beyond that cap will NOT be advanced. Paginate closingIssuesReferences (or raise PAGE_CAP) if this is ever hit."
+          fi
+
+          # `.nodes[]?` (optional iterate) so a null pullRequest/closingIssuesReferences
+          # -- possible on a partial GraphQL response even when gh exits 0 -- degrades to
+          # an empty set instead of aborting the step with jq "Cannot iterate over null".
+          # Owner/name compared case-INSENSITIVELY (ascii_downcase both sides): GitHub
+          # logins/repo names are case-insensitive, and the canonical casing from the
+          # GraphQL nodes need not match the github.* context casing -- an exact compare
+          # would silently drop a legitimate same-repo ref. `// ""` guards a per-node NULL
+          # repository (e.g. a cross-repo ref whose target repo was deleted / is invisible):
+          # `null | ascii_downcase` RAISES ("explode input must be a string") and, under
+          # `set -e`, would abort this whole step; the empty string never matches the
+          # non-empty OWNER/REPO, so such a node is filtered out instead.
+          numbers=$(jq -r '.data.repository.pullRequest.closingIssuesReferences.nodes[]?
+                  | select(((.repository.owner.login // "") | ascii_downcase) == (env.OWNER | ascii_downcase)
+                           and ((.repository.name // "") | ascii_downcase) == (env.REPO | ascii_downcase))
+                  | .number' <<<"$refs_json")
+          {
+            echo "numbers<<NUMBERS_EOF"
+            echo "$numbers"
+            echo "NUMBERS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Move each linked issue to "In progress" if it hasn't started
+        # `linked` emits `numbers` only on its success path and is itself gated on the token
+        # being present, so a non-empty `numbers` already implies token-present -- no need to
+        # re-check steps.token.outputs.present here.
+        if: steps.linked.outputs.numbers != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NUMBERS: ${{ steps.linked.outputs.numbers }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          set -uo pipefail
+
+          # Fail-fast preflight: one query resolves the project's node id, its Status
+          # field id, and the "In progress" option id BY NAME, AND reads THIS repo's node
+          # id with the SAME PROJECT_TOKEN. It catches an empty/expired PROJECT_TOKEN, a
+          # token lacking the org-Project scope, a renamed/recreated board, OR -- via the
+          # `repository { id }` selection -- a token that can read the Project but CANNOT
+          # see this (private) repo. That last case is why the repo read is here: without
+          # it, the token's repo blindness surfaces only per-issue in the loop below as a
+          # NOT_FOUND (which the loop SWALLOWS as "deleted/transferred"), turning a
+          # misconfigured token into a green no-op that advances nothing. A token missing
+          # repo access makes GitHub return `repository: null` PLUS a NOT_FOUND error, so
+          # `gh api graphql` exits non-zero and this `if !` branch reddens with the clear
+          # scope error below. gh's own error goes to the step log on stderr -- do NOT
+          # merge it into the captured JSON (2>&1 would corrupt the jq parse on any
+          # success-path stderr).
+          if ! project_json=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $number: Int!, $statusField: String!) {
+                organization(login: $org) {
+                  projectV2(number: $number) {
+                    id
+                    field(name: $statusField) {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+                repository(owner: $org, name: $repo) { id }
+              }' -f org="$OWNER" -f repo="$REPO" -F number="$PROJECT_NUMBER" -f statusField="$STATUS_FIELD_NAME"); then
+            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER or the '$OWNER/$REPO' repository with PROJECT_TOKEN. Is the PAT valid and granted BOTH org Projects read AND access to this repo? (classic PAT: 'project' + 'repo'; fine-grained: org 'Projects: Read and write' + repo 'Issues: Read'.) gh's error is above."
+            exit 1
+          fi
+
+          # Read the four preflight ids WITHOUT `@tsv`+`read`. TAB is an IFS-*whitespace*
+          # character, so `IFS=$'\t' read` collapses consecutive tabs and DROPS an empty
+          # field -- not just a trailing one: a renamed "In progress" option makes jq emit
+          # `PVT\tFLD\t\tREPO` (empty option id), whose `\t\t` collapses and shifts the repo
+          # id into in_progress_option_id (so the `[ -z "$in_progress_option_id" ]` check
+          # below is bypassed and the WRONG repo-scope error fires). Instead emit one value
+          # PER LINE and `mapfile -t`, which keeps an empty line as an empty element -- so
+          # the four fields stay aligned even when any is empty. (Node ids / the project id
+          # never contain a newline, so line-splitting is safe; the ordered option NAMES are
+          # still read by their own `mapfile` below.)
+          mapfile -t preflight_fields < <(jq -r --arg name "$IN_PROGRESS_OPTION_NAME" '
+            .data as $d
+            | $d.organization.projectV2 as $p
+            | ($p.id // ""),
+              ($p.field.id // ""),
+              ([$p.field.options[]? | select(.name == $name) | .id][0] // ""),
+              ($d.repository.id // "")' <<<"$project_json")
+          project_id="${preflight_fields[0]:-}"
+          status_field_id="${preflight_fields[1]:-}"
+          in_progress_option_id="${preflight_fields[2]:-}"
+          repo_id="${preflight_fields[3]:-}"
+
+          if [ -z "$project_id" ] || [ -z "$status_field_id" ] || [ -z "$in_progress_option_id" ]; then
+            echo "::error::Could not resolve the MMW project / its '$STATUS_FIELD_NAME' field / its '$IN_PROGRESS_OPTION_NAME' option by name -- was the board or field renamed or recreated?"
+            echo "$project_json" >&2
+            exit 1
+          fi
+
+          # Defense-in-depth for the repo-visibility check above: a token missing repo
+          # access normally makes gh exit non-zero (caught by the preflight `if !`), but
+          # if GitHub ever returned repository:null WITHOUT an error, a null repo_id still
+          # fails HERE loudly rather than letting the per-issue NOT_FOUND swallow green.
+          if [ -z "$repo_id" ]; then
+            echo "::error::PROJECT_TOKEN resolved the org project but CANNOT see '$OWNER/$REPO' -- it is missing repo access (classic PAT: add 'repo'; fine-grained PAT: grant this repo 'Issues: Read'). Without it every linked issue reads as NOT_FOUND and no card would be advanced."
+            exit 1
+          fi
+
+          # DERIVE the not-started column set from the board's own column ORDER: every
+          # Status option positioned BEFORE "In progress" is a not-started column. Reading
+          # it from the board (rather than a hardcoded list) means any pre-start column --
+          # including a default auto-add column like "Todo" -- is covered automatically, and
+          # a rename/add/reorder self-heals with no config to keep in sync by hand. The
+          # options come back in board display order (jq preserves array order); -t keeps a
+          # space-bearing name like "In progress" whole. "In progress" itself resolved by
+          # name above (in_progress_option_id is non-empty), so it is guaranteed present in
+          # this ordered list, so the loop always terminates at it.
+          mapfile -t board_option_names < <(jq -r '.data.organization.projectV2.field.options[]?.name' <<<"$project_json")
+          not_started_names=()
+          for board_name in "${board_option_names[@]}"; do
+            [ "$board_name" = "$IN_PROGRESS_OPTION_NAME" ] && break
+            not_started_names+=("$board_name")
+          done
+
+          # Best-effort mid-board REORDER guard: if a KNOWN started/terminal column (see
+          # STARTED_STATUS_NAMES) landed BEFORE "In progress", the board was reordered out of
+          # left-to-right progress order and cards in that column would be wrongly advanced.
+          # Warn (never block) -- the degenerate "In progress is first" case is warned
+          # separately below; this catches the more dangerous "later column dragged left" one.
+          IFS=',' read -r -a started_status_names <<<"$STARTED_STATUS_NAMES"
+          for not_started_name in "${not_started_names[@]}"; do
+            for started_name in "${started_status_names[@]}"; do
+              if [ "$not_started_name" = "$started_name" ]; then
+                echo "::warning::board #$PROJECT_NUMBER lists '$not_started_name' BEFORE '$IN_PROGRESS_OPTION_NAME', so cards in it are treated as not-started and would be advanced to '$IN_PROGRESS_OPTION_NAME'. If that is a later/started column the board was reordered out of left-to-right progress order -- restore the order (or adjust STARTED_STATUS_NAMES)."
+                break
+              fi
+            done
+          done
+
+          # Deriving the not-started set from column ORDER silently changes semantics if
+          # the board is REORDERED (a rename fails loud; a reorder does not). The clearest
+          # symptom is "In progress" ending up FIRST -- then nothing precedes it, so no
+          # not-started columns are derived and ONLY no-status cards ever advance. Surface
+          # that as a warning so a misordered board is visible instead of quietly moving
+          # nothing. (A board that legitimately has no pre-start column is rare; the
+          # warning is cheap and self-clears once order is restored.)
+          if [ "${#not_started_names[@]}" -eq 0 ]; then
+            echo "::warning::'$IN_PROGRESS_OPTION_NAME' is the FIRST column on board #$PROJECT_NUMBER, so no not-started columns were derived -- only cards with NO status will be advanced. If the board was reordered, restore left-to-right progress order (not-started columns BEFORE '$IN_PROGRESS_OPTION_NAME')."
+          fi
+
+          # A per-issue failure (a locked issue, a transient 5xx on the move, ...) must
+          # not abort the rest of the batch, but it also must not pass silently: record
+          # it and fail the job at the end so it's actually seen (mirrors reconcile-issue-
+          # labels.yml's tally). A here-string feeds the loop so `failed` survives it (no pipe
+          # subshell -- hence no /tmp marker file needed).
+          failed=0
+          while IFS= read -r number; do
+            [ -z "$number" ] && continue
+
+            # One query resolves this issue's item (and current Status) within the MMW
+            # project -- an issue can be in several projects, so filter by project id.
+            # gh's error goes to the step log on stderr (no 2>&1 -- see the preflight).
+            if ! item_json=$(gh api graphql -f query='
+                query($owner: String!, $repo: String!, $issue: Int!, $statusField: String!, $first: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    issue(number: $issue) {
+                      projectItems(first: $first) {
+                        totalCount
+                        nodes {
+                          id
+                          project { id }
+                          fieldValueByName(name: $statusField) {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' -f owner="$OWNER" -f repo="$REPO" -F issue="$number" -f statusField="$STATUS_FIELD_NAME" -F first="$PAGE_CAP"); then
+              # A deleted / transferred-away issue returns a NOT_FOUND GraphQL error (gh
+              # exits non-zero, but the JSON body -- incl. `.errors` -- is still on stdout,
+              # captured in item_json). That is NOT a real failure: the linked issue simply
+              # no longer exists in THIS repo, so skip it quietly rather than reddening the
+              # job on every subsequent PR event. Any OTHER error is a genuine fault -- warn
+              # and fail the job at the end (mirrors the closing-refs read's posture).
+              if jq -e 'any(.errors[]?; .type == "NOT_FOUND")' <<<"$item_json" >/dev/null 2>&1; then
+                echo "Issue #$number no longer exists in $OWNER/$REPO (deleted or transferred since it was linked) -- nothing to move."
+                continue
+              fi
+              echo "::warning::failed to query project item for #$number (gh's error is above)"
+              failed=1
+              continue
+            fi
+
+            # An issue that EXISTS but is not on the MMW project yields an empty item_id,
+            # handled below (a deleted/transferred issue is caught by the NOT_FOUND check
+            # above, not here). `nodes[]?` tolerates a null .issue without a jq "cannot
+            # iterate over null" error. IFS=$'\t' so a space-bearing Status name ("In
+            # progress") lands whole in `status`.
+            IFS=$'\t' read -r item_id status <<<"$(jq -r --arg pid "$project_id" \
+              '[.data.repository.issue.projectItems.nodes[]? | select(.project.id == $pid)][0] | [.id, (.fieldValueByName.name // "")] | @tsv' <<<"$item_json")"
+
+            if [ -z "${item_id:-}" ]; then
+              # If the issue is in >100 projects the MMW item may have been truncated by
+              # the first:100 cap (unpaginated) rather than genuinely absent -- warn so a
+              # false "not in the project" is visible instead of a silent skip.
+              item_projects_total=$(jq -r '.data.repository.issue.projectItems.totalCount // 0' <<<"$item_json")
+              if [ "$item_projects_total" -gt "$PAGE_CAP" ]; then
+                echo "::warning::#$number is in $item_projects_total projects but only the first $PAGE_CAP are read -- if its MMW item is beyond that cap it is wrongly treated as 'not in the project'. Paginate projectItems (or raise PAGE_CAP) if this is ever hit."
+              fi
+              echo "Issue #$number is not in the MMW project -- nothing to move."
+              continue
+            fi
+
+            # Advance an item that hasn't started yet -- no Status set, or a not-started
+            # column (any option before "In progress", derived above). Any other status
+            # (already In progress/In review/Done, or a later column) is a deliberate
+            # later state and is left untouched. Exact membership via an array loop --
+            # NOT a `printf | grep` pipe, whose SIGPIPE-on-match would misreport under
+            # `set -o pipefail`.
+            if [ -n "$status" ]; then
+              is_not_started=""
+              for not_started_name in "${not_started_names[@]}"; do
+                if [ "$status" = "$not_started_name" ]; then
+                  is_not_started=1
+                  break
+                fi
+              done
+              if [ -z "$is_not_started" ]; then
+                echo "Issue #$number Status is '$status' -- leaving as-is."
+                continue
+              fi
+              # The item is currently in a not-started column. Advance it OUT only on a
+              # work-STARTING event (PR opened, reopened, or flipped to ready_for_review).
+              # Since #779 synchronize and edited no longer reach this workflow at all, so
+              # this guard is belt-and-braces: it keeps the RULE stated where it is enforced,
+              # so re-adding a trigger type cannot silently drop the protection. It reads: do
+              # NOT re-advance a card already sitting in
+              # Backlog/Ready for work: by then it was most likely moved there deliberately
+              # (e.g. parking an in-flight PR), and yanking it back to In progress on the
+              # next push would silently fight that decision.
+              #
+              # Be precise about the scope of that protection: a `reopened` or a
+              # draft->`ready_for_review` flip IS treated as work-starting and WILL
+              # re-advance a deliberately re-parked card -- an accepted trade-off, because
+              # ready_for_review is also what lets a card AUTO-ADDED with a non-empty status
+              # (or LINKED by a later body edit) after the opened run finally converge. That
+              # second case matters MORE since #779: a body edit adding `Closes #N` no longer
+              # fires this workflow at all, so the draft->ready flip is now the only thing
+              # that advances a late-linked issue. TWO KNOWN GAPS (won't-fix, docs-only per
+              # the #8 design record): (a) a non-empty not-started card on a NON-draft PR
+              # never gets a ready_for_review event, so it stays put until a reopen/manual
+              # nudge; (b) a card whose status was CLEARED to empty (rather than moved to a
+              # named column) falls through the `[ -n "$status" ]` guard above and is
+              # advanced on any event that reaches this workflow -- so clearing-to-empty is
+              # still NOT a protected re-park, though since #779 that means only the three
+              # work-starting events rather than every push. An item with NO status yet
+              # behaves the same way.
+              if [ "$EVENT_ACTION" != "opened" ] && [ "$EVENT_ACTION" != "reopened" ] && [ "$EVENT_ACTION" != "ready_for_review" ]; then
+                echo "Issue #$number is in '$status' on a '$EVENT_ACTION' event -- leaving as-is (a not-started card is advanced only on PR open/reopen/ready-for-review). Since #779 no other event reaches this workflow, so this line should be unreachable; seeing it means the trigger set was widened without revisiting this guard."
+                continue
+              fi
+            fi
+
+            # gh's error goes to the step log on stderr (no capture / no 2>&1).
+            if ! gh api graphql -f query='
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { singleSelectOptionId: $optionId }
+                  }) {
+                    projectV2Item { id }
+                  }
+                }' \
+              -f projectId="$project_id" -f itemId="$item_id" \
+              -f fieldId="$status_field_id" -f optionId="$in_progress_option_id"; then
+              echo "::warning::failed to move #$number to In progress (gh's error is above). If EVERY linked issue fails this way, PROJECT_TOKEN likely has Projects: READ but not WRITE -- the preflight only proves read access; the mutation needs 'Projects: Read and write' (fine-grained) / 'project' (classic)."
+              failed=1
+              continue
+            fi
+            echo "Moved #$number to In progress."
+          done <<< "$NUMBERS"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::One or more linked issues could not be moved to In progress -- see the warnings above."
+            exit 1
+          fi

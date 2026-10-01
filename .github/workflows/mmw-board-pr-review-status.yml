@@ -1,0 +1,328 @@
+name: Update the board on a PR review (MMW board)
+
+# When a reviewer SUBMITS a review, keep two cards on the org-level "MMW" Project (v2, #2)
+# honest (issue #399 §4):
+#
+#   1. The PR's OWN Status -> "In progress" (reviewing). Any submitted review means review is
+#      underway. Advanced ONLY from "Ready for work" (the ready-but-not-yet-reviewed column) --
+#      a still-draft PR in Backlog, a PR already In progress, or a merged/Done PR is left alone.
+#
+#   2. On "changes requested" only: the linked ISSUE(s) -> "In progress" (from "In review").
+#      This is what keeps the IMPLEMENTER's board honest through the fix cycle without any PR
+#      reassignment: the PR stays the reviewer's, while the implementer's fix-work shows as the
+#      issue cycling In review <-> In progress (the near-mirror of move-issue-in-review.yml,
+#      reversed). Guarded to advance an issue ONLY from exactly "In review".
+#
+# Needs the same PROJECT_TOKEN PAT as the move-issue-* workflows, but with ONE ADDED SCOPE: it
+# reads the PR's project item via `repository.pullRequest(...)`, so the PAT needs `Pull requests:
+# Read` in ADDITION to `Issues: Read` + org Projects (a classic repo+project PAT already covers
+# it; a fine-grained PAT must add it). Skips cleanly when the secret is absent.
+
+on:
+  # Each repository's caller file sets the real trigger and the concurrency group, and
+  # calls this file with `secrets: inherit`. The notes on the trigger are kept here.
+  # There is NO `pull_request_review_target` event -- review automations can only use
+  # `pull_request_review`. ACCEPTED GAP (won't-fix, no escape hatch): like `pull_request`, a
+  # `pull_request_review` run may be suppressed by GitHub while the PR has a MERGE CONFLICT
+  # (the merge commit can't be computed). So a review submitted on a conflicted PR may not move
+  # the cards until the conflict is resolved and a later event fires. This is the same
+  # suppression documented for the move-issue-* siblings, but here it cannot be dodged with a
+  # `_target` variant because none exists. Bounded and self-correcting (the next review/lifecycle
+  # event on the un-conflicted PR moves the cards), and it fails safe (a card merely lags, never
+  # lands wrong). SAFE otherwise: this workflow never checks out or runs PR code -- it issues
+  # `gh api` calls keyed on the PR NUMBER and the review STATE only.
+  workflow_call:
+
+permissions:
+  pull-requests: read
+  issues: read
+
+# CONCURRENCY is set by each caller file, so the group holds within the calling
+# repository; the notes on it are kept here, beside the logic they protect.
+# Serialize per PR in a group SHARED with set-pr-status.yml (both `pr-board-<n>`) so a review
+# event and a lifecycle event can't race the same PR card to conflicting values. Several
+# reviewers submitting near-simultaneously are serialized by the same group.
+#
+# ACCEPTED GAP (won't-fix; the same pending-run asymmetry move-issue-in-progress.yml documents):
+# GitHub keeps only ONE pending run per group and cancels the older pending run when a newer one
+# queues (cancel-in-progress governs the IN-PROGRESS run, not the pending one). Because the group
+# is shared, a still-PENDING pull_request_review run can be cancelled by a newer same-group
+# lifecycle event -- and since a submitted review is a ONE-SHOT event with no recurring
+# re-trigger, its effects (PR Ready for work->In progress; on changes_requested the linked issue
+# In review->In progress) are then dropped with no self-heal until the next review is submitted.
+# Fails safe (a card lags, never lands wrong). Accepted over un-sharing the group, which would
+# reintroduce the lifecycle-vs-review race on the PR card the shared group exists to prevent.
+
+env:
+  PROJECT_NUMBER: 2
+  STATUS_FIELD_NAME: Status
+  IN_PROGRESS_STATUS_NAME: In progress
+  IN_REVIEW_STATUS_NAME: In review
+  READY_STATUS_NAME: Ready for work
+
+jobs:
+  update-on-review:
+    runs-on: ubuntu-latest
+    env:
+      OWNER: ${{ github.repository_owner }}
+      REPO: ${{ github.event.repository.name }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REVIEW_STATE: ${{ github.event.review.state }}
+      PAGE_CAP: 100
+    steps:
+      # A one-hour token for the MMW Automation GitHub App (D14 of mmw's plan 876). A repository
+      # without the app's key fails here, loudly, rather than skipping.
+      - name: Get a token for the MMW Automation app
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.MMW_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.MMW_AUTOMATION_PRIVATE_KEY }}
+          owner: mark-my-work
+      - name: Check the PROJECT_TOKEN secret is available
+        id: token
+        env:
+          PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -uo pipefail
+          if [ -n "${PROJECT_TOKEN:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "PROJECT_TOKEN is not available -- skipping the review board update. The PAT secret is unset. (Unlike a plain \`pull_request\` workflow, \`pull_request_review\` runs in the base-repo context and DOES receive secrets on fork / Dependabot PRs, so this branch means the secret is genuinely absent, not a fork.)"
+          fi
+
+      - name: Move the PR (and, on changes-requested, its issues) forward
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -uo pipefail
+          # github.event.review.state is lowercase: approved | commented | changes_requested.
+          echo "PR #$PR_NUMBER review submitted with state '$REVIEW_STATE'."
+
+          # Preflight: project id, Status field id, the three option ids we may need (by name),
+          # and this repo's node id -- all with PROJECT_TOKEN.
+          # The preflight ALSO reads `pullRequest(number:){ id }` so a PROJECT_TOKEN missing the NEW
+          # `Pull requests: Read` scope this workflow needs fails HERE (naming the scope) instead of
+          # later at the PR/closing-refs reads with a generic error.
+          if ! project_json=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $number: Int!, $statusField: String!, $pr: Int!) {
+                organization(login: $org) {
+                  projectV2(number: $number) {
+                    id
+                    field(name: $statusField) {
+                      ... on ProjectV2SingleSelectField { id options { id name } }
+                    }
+                  }
+                }
+                repository(owner: $org, name: $repo) { id pullRequest(number: $pr) { id } }
+              }' -f org="$OWNER" -f repo="$REPO" -F number="$PROJECT_NUMBER" -f statusField="$STATUS_FIELD_NAME" -F pr="$PR_NUMBER"); then
+            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER, the '$OWNER/$REPO' repository, or PR #$PR_NUMBER with PROJECT_TOKEN (valid PAT with org Projects + repo access + the 'Pull requests: Read' scope this workflow adds?). gh's error is above."
+            exit 1
+          fi
+
+          # Resolve the "In progress" WRITE-target id, AND the two FROM-guard option ids
+          # ("Ready for work" / "In review") purely as fail-loud CANARIES: the guards below compare
+          # status NAMES, so a rename of a guard column would otherwise SILENTLY disable the effect.
+          # Resolving + non-empty-validating them here makes such a rename fail loud (matching
+          # move-issue-in-review.yml, which validates its FROM option though it only writes the TO
+          # option). Also capture the PR node id for the scope check below.
+          mapfile -t preflight < <(jq -r --arg inprog "$IN_PROGRESS_STATUS_NAME" --arg ready "$READY_STATUS_NAME" --arg inreview "$IN_REVIEW_STATUS_NAME" '
+            .data as $d
+            | $d.organization.projectV2 as $p
+            | ($p.id // ""),
+              ($p.field.id // ""),
+              ([$p.field.options[]? | select(.name == $inprog) | .id][0] // ""),
+              ([$p.field.options[]? | select(.name == $ready) | .id][0] // ""),
+              ([$p.field.options[]? | select(.name == $inreview) | .id][0] // ""),
+              ($d.repository.id // ""),
+              ($d.repository.pullRequest.id // "")' <<<"$project_json")
+          project_id="${preflight[0]:-}"
+          status_field_id="${preflight[1]:-}"
+          in_progress_option_id="${preflight[2]:-}"
+          ready_option_id="${preflight[3]:-}"      # canary only -- Effect 1 guard compares by name
+          in_review_option_id="${preflight[4]:-}"  # canary only -- Effect 2 guard compares by name
+          repo_id="${preflight[5]:-}"
+          pr_node_id="${preflight[6]:-}"
+
+          if [ -z "$project_id" ] || [ -z "$status_field_id" ] || [ -z "$in_progress_option_id" ] || [ -z "$ready_option_id" ] || [ -z "$in_review_option_id" ]; then
+            echo "::error::Could not resolve the MMW project / its '$STATUS_FIELD_NAME' field / its '$IN_PROGRESS_STATUS_NAME', '$READY_STATUS_NAME', or '$IN_REVIEW_STATUS_NAME' option by name -- was the board or field renamed or recreated? (The two guard options are validated here as fail-loud canaries even though the guards compare by name.)"
+            echo "$project_json" >&2
+            exit 1
+          fi
+          if [ -z "$repo_id" ]; then
+            echo "::error::PROJECT_TOKEN resolved the org project but CANNOT see '$OWNER/$REPO' -- missing repo access; PR/issue items would read as NOT_FOUND."
+            exit 1
+          fi
+          if [ -z "$pr_node_id" ]; then
+            echo "::error::PROJECT_TOKEN can see '$OWNER/$REPO' but NOT PR #$PR_NUMBER -- the PAT is missing 'Pull requests: Read' (this workflow reads the PR's project item + its closing refs). Without it the reads below fail."
+            exit 1
+          fi
+
+          # updateProjectV2ItemFieldValue helper (returns non-zero on failure).
+          set_status() { # $1=item_id $2=option_id
+            gh api graphql -f query='
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId itemId: $itemId fieldId: $fieldId
+                  value: { singleSelectOptionId: $optionId }
+                }) { projectV2Item { id } }
+              }' -f projectId="$project_id" -f itemId="$1" -f fieldId="$status_field_id" -f optionId="$2"
+          }
+
+          failed=0
+
+          # ---- Effect 1: the PR's own card -> In progress, only from Ready for work. ----
+          if ! pr_json=$(gh api graphql -f query='
+              query($owner: String!, $repo: String!, $pr: Int!, $statusField: String!, $first: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $pr) {
+                    projectItems(first: $first) {
+                      totalCount
+                      nodes {
+                        id project { id }
+                        fieldValueByName(name: $statusField) {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -f statusField="$STATUS_FIELD_NAME" -F first="$PAGE_CAP"); then
+            echo "::warning::Could not query the PR's own project item (gh's error is above); leaving the PR card unchanged."
+            failed=1
+          else
+            IFS=$'\t' read -r pr_item_id pr_status <<<"$(jq -r --arg pid "$project_id" \
+              '[.data.repository.pullRequest.projectItems.nodes[]? | select(.project.id == $pid)][0] | [.id, (.fieldValueByName.name // "")] | @tsv' <<<"$pr_json")"
+            if [ -z "${pr_item_id:-}" ]; then
+              pr_projects_total=$(jq -r '.data.repository.pullRequest.projectItems.totalCount // 0' <<<"$pr_json")
+              if [ "$pr_projects_total" -gt "$PAGE_CAP" ]; then
+                echo "::warning::PR #$PR_NUMBER is in $pr_projects_total projects but only the first $PAGE_CAP are read -- its MMW item may be beyond that cap and wrongly read as 'not on the board'."
+              fi
+              echo "PR #$PR_NUMBER is not on the MMW board yet -- not setting its Status."
+            # KNOWN GAP (PLAUSIBLE, issue #399 review cycle 2): this advances ONLY from an exact
+            # "Ready for work". So a PR opened DIRECTLY non-draft that lost set-pr-status.yml's
+            # auto-add race (its card stranded in the auto-add default column with empty/other
+            # status, with no future lifecycle event to fix it -- that workflow's documented gap)
+            # can NEVER be rescued by a review: the guard skips any non-"Ready for work" status, so
+            # the card stays outside "In progress" through active review. Not widened to also advance
+            # from a no-status card, because that must NOT promote a deliberate Backlog draft under
+            # review -- distinguishing "auto-add default / empty" from "deliberately Backlog"
+            # reliably is a behavioral change left out of scope. Rare (auto-add usually wins; the
+            # draft-early convention means most PRs self-heal via ready_for_review) and fails safe.
+            elif [ "$pr_status" != "$READY_STATUS_NAME" ]; then
+              echo "PR #$PR_NUMBER Status is '${pr_status:-<none>}' -- leaving as-is (review only advances a PR from '$READY_STATUS_NAME' to '$IN_PROGRESS_STATUS_NAME')."
+            elif set_status "$pr_item_id" "$in_progress_option_id"; then
+              echo "Moved PR #$PR_NUMBER '$READY_STATUS_NAME' -> '$IN_PROGRESS_STATUS_NAME'."
+            else
+              echo "::warning::Failed to move PR #$PR_NUMBER to '$IN_PROGRESS_STATUS_NAME' (gh's error is above)."
+              failed=1
+            fi
+          fi
+
+          # ---- Effect 2: on changes_requested only, linked issues In review -> In progress. ----
+          # KNOWN GAP (deliberate, issue #399 review cycle 2): this In review->In progress move has
+          # no automated inverse on a normal fix cycle. After changes are requested, the implementer
+          # usually just pushes fixes (synchronize -- no board event) and re-requests review, which
+          # never re-fires move-issue-in-review.yml's one-shot ready_for_review, so the issue stays
+          # "In progress" through re-review and goes straight to Done on merge, never re-showing
+          # "In review". Accepted (kept minimal) rather than triggering on review_requested, which
+          # also fires on initial/draft review requests and would move issues to "In review"
+          # prematurely. Re-flip draft->ready to force the issue back to "In review" if needed.
+          #
+          # ACCEPTED RACE (PLAUSIBLE, issue #399 review cycle 2): these issue-card writes are NOT
+          # serialized against move-issue-in-review.yml, which writes the SAME issue card under its
+          # own concurrency group (move-issue-in-review-<n>) -- the shared pr-board-<n> group guards
+          # only the PR card. So a near-simultaneous ready_for_review (In progress->In review) and
+          # changes_requested (this In review->In progress) can interleave: if this run reads the
+          # issue as "In progress" before the other's write, its guard skips and the issue lands at
+          # "In review" though changes were requested. Narrow window; fails safe (wrong-but-valid
+          # column, never corrupt). The only real fix is putting ALL issue-card writers under one
+          # shared group (a cross-workflow change spanning both move-issue-* workflows), left out of
+          # scope here. NOTE: this is also why set-pr-status.yml stays PR-only -- adding a third
+          # unsynchronized issue-card writer would widen this collision.
+          if [ "$REVIEW_STATE" = "changes_requested" ]; then
+            if ! refs_json=$(gh api graphql -f query='
+                query($owner: String!, $repo: String!, $pr: Int!, $first: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $pr) {
+                      closingIssuesReferences(first: $first) {
+                        totalCount
+                        nodes { number repository { owner { login } name } }
+                      }
+                    }
+                  }
+                }' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -F first="$PAGE_CAP"); then
+              echo "::error::Could not read closing issue references for PR #$PR_NUMBER (gh's error is above)."
+              exit 1
+            fi
+
+            total_refs=$(jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount // 0' <<<"$refs_json")
+            if [ "$total_refs" -gt "$PAGE_CAP" ]; then
+              echo "::warning::PR #$PR_NUMBER has $total_refs closing references but only the first $PAGE_CAP are read."
+            fi
+
+            # Keep only refs in THIS repo (a closing ref can be cross-repo).
+            numbers=$(jq -r '.data.repository.pullRequest.closingIssuesReferences.nodes[]?
+                    | select(((.repository.owner.login // "") | ascii_downcase) == (env.OWNER | ascii_downcase)
+                             and ((.repository.name // "") | ascii_downcase) == (env.REPO | ascii_downcase))
+                    | .number' <<<"$refs_json")
+
+            while IFS= read -r number; do
+              [ -z "$number" ] && continue
+              if ! issue_json=$(gh api graphql -f query='
+                  query($owner: String!, $repo: String!, $issue: Int!, $statusField: String!, $first: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      issue(number: $issue) {
+                        projectItems(first: $first) {
+                          totalCount
+                          nodes {
+                            id project { id }
+                            fieldValueByName(name: $statusField) {
+                              ... on ProjectV2ItemFieldSingleSelectValue { name }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }' -f owner="$OWNER" -f repo="$REPO" -F issue="$number" -f statusField="$STATUS_FIELD_NAME" -F first="$PAGE_CAP"); then
+                if jq -e 'any(.errors[]?; .type == "NOT_FOUND")' <<<"$issue_json" >/dev/null 2>&1; then
+                  echo "Issue #$number no longer exists in $OWNER/$REPO -- nothing to move."
+                  continue
+                fi
+                echo "::warning::failed to query project item for #$number (gh's error is above)"
+                failed=1
+                continue
+              fi
+
+              IFS=$'\t' read -r item_id status <<<"$(jq -r --arg pid "$project_id" \
+                '[.data.repository.issue.projectItems.nodes[]? | select(.project.id == $pid)][0] | [.id, (.fieldValueByName.name // "")] | @tsv' <<<"$issue_json")"
+
+              if [ -z "${item_id:-}" ]; then
+                issue_projects_total=$(jq -r '.data.repository.issue.projectItems.totalCount // 0' <<<"$issue_json")
+                if [ "$issue_projects_total" -gt "$PAGE_CAP" ]; then
+                  echo "::warning::Issue #$number is in $issue_projects_total projects but only the first $PAGE_CAP are read -- its MMW item may be beyond that cap and wrongly read as 'not on the board'."
+                fi
+                echo "Issue #$number is not on the MMW board -- nothing to move."
+                continue
+              fi
+              # Narrow: only pull an issue back from exactly "In review". An issue already In
+              # progress (a prior fix cycle), or anywhere else, is left alone.
+              if [ "$status" != "$IN_REVIEW_STATUS_NAME" ]; then
+                echo "Issue #$number Status is '${status:-<none>}' -- leaving as-is (changes-requested only pulls back from '$IN_REVIEW_STATUS_NAME')."
+                continue
+              fi
+              if set_status "$item_id" "$in_progress_option_id"; then
+                echo "Moved issue #$number '$IN_REVIEW_STATUS_NAME' -> '$IN_PROGRESS_STATUS_NAME'."
+              else
+                echo "::warning::Failed to move issue #$number to '$IN_PROGRESS_STATUS_NAME' (gh's error is above)."
+                failed=1
+              fi
+            done <<< "$numbers"
+          fi
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::One or more board updates failed for PR #$PR_NUMBER -- see the warnings above."
+            exit 1
+          fi

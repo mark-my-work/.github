@@ -1,0 +1,32 @@
+name: Verify commit authorship
+
+# Required on every pull request into a default branch, in every repository, by the
+# default-branch ruleset. It runs in the repository the pull request is in, which pays its
+# minutes. The script is read from mark-my-work/.github's main rather than from the pull
+# request, so a pull request to .github cannot change the check that judges it.
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  verify-authors:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pull request with full history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the check from mark-my-work/.github's main
+        uses: actions/checkout@v7
+        with:
+          repository: mark-my-work/.github
+          ref: main
+          path: .mmw-setup
+          persist-credentials: false
+      - name: Verify every new commit's author
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: .mmw-setup/scripts/verify-authors.sh "$BASE_REF" "$HEAD_SHA"

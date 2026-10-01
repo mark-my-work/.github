@@ -1,0 +1,66 @@
+name: Reconcile issue labels
+
+# Keeps Epic, needs-priority and needs-effort correct on every open issue in every private
+# mark-my-work repository; scripts/reconcile-issue-labels.sh states the rules. One job for the
+# whole organization, every 6 hours: GitHub bills each job as a whole minute, and this
+# repository is public, so the run costs no minutes at all. A label may lag reality by up to
+# 6 hours (#778).
+#
+# GH_TOKEN is a one-hour token for the MMW Automation GitHub App, because the job changes
+# labels in repositories other than this one. Its key is why check-triggers.yml keeps every
+# workflow in this public repository off the triggers an outsider can start.
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    # Ticked by default, so a bare dispatch reconciles everything; untick to narrow.
+    inputs:
+      epics:
+        description: Reconcile the Epic label
+        type: boolean
+        default: true
+      priority:
+        description: Reconcile the needs-priority label
+        type: boolean
+        default: true
+      effort:
+        description: Reconcile the needs-effort label
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # cancel-in-progress stays false: a cancelled run never reports its failures.
+  group: reconcile-issue-labels
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get a token for the MMW Automation app
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.MMW_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.MMW_AUTOMATION_PRIVATE_KEY }}
+          owner: mark-my-work
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Reconcile every repository
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          EPICS: ${{ github.event_name != 'workflow_dispatch' || inputs.epics }}
+          PRIORITY: ${{ github.event_name != 'workflow_dispatch' || inputs.priority }}
+          EFFORT: ${{ github.event_name != 'workflow_dispatch' || inputs.effort }}
+        run: |
+          set -euo pipefail
+          selected=()
+          if [ "$EPICS" = true ]; then selected+=(epics); fi
+          if [ "$PRIORITY" = true ]; then selected+=(priority); fi
+          if [ "$EFFORT" = true ]; then selected+=(effort); fi
+          if [ "${#selected[@]}" -eq 0 ]; then echo "Nothing selected."; exit 0; fi
+          scripts/reconcile-issue-labels.sh "${selected[@]}"

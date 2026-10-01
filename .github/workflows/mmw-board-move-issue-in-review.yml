@@ -1,0 +1,285 @@
+name: Move linked issue to In review (MMW board)
+
+# When a PR flips from Draft to "Ready for review" -- the `ready_for_review` PR action
+# type, which fires on EXACTLY that transition (no polling/diffing needed) -- advance
+# each issue the PR closes from "In progress" to "In review" in the org-level "MMW"
+# Project (v2, #2). Deliberately MINIMAL, unlike its sibling move-issue-in-progress.yml:
+# it only acts when the issue's CURRENT Status is exactly "In progress" (not any
+# not-started column, not "no status") and only on this one event -- every other case
+# (re-parked cards, reopens, synchronize, a PR opened already non-draft, ...) is left
+# alone for a human/future automation to handle.
+#
+# ACCEPTED TRADE-OFF (won't-fix): because it triggers ONLY on the one-shot
+# `ready_for_review` transition, a transient per-issue query/mutation failure reddens the
+# run (loud + visible) but is NOT retried automatically -- unlike move-issue-in-progress
+# .yml, which self-heals across its recurring events (opened/edited/synchronize/reopened).
+# Recovery is a manual job re-run or a draft->ready re-flip. The failure fails LOUD, so the
+# card is never silently left behind; auto-retry isn't worth a broader trigger set here.
+#
+# Needs the same PROJECT_TOKEN PAT as move-issue-in-progress.yml (see that file's header
+# for the scope requirements) and skips cleanly when the secret is absent. (Unlike its
+# `pull_request`-triggered sibling, `pull_request_target` DOES expose secrets to fork /
+# Dependabot PRs -- harmless here, since this workflow never checks out or executes PR
+# code; see the trigger note below.)
+
+on:
+  # Each repository's caller file sets the real trigger and the concurrency group, and
+  # calls this file with `secrets: inherit`. The notes on the trigger are kept here.
+  # `pull_request_target`, NOT `pull_request` -- deliberate, and load-bearing.
+  #
+  # GitHub schedules a `pull_request` run against the PR's MERGE COMMIT (refs/pull/<n>/merge),
+  # which it CANNOT compute while the PR has a merge conflict -- per the Actions docs,
+  # "Workflows will not run on `pull_request` activity if the pull request has a merge
+  # conflict." So a PR flipped Draft->ready WHILE CONFLICTED had its one-shot
+  # `ready_for_review` dropped ENTIRELY: no run, no red X, nothing to notice -- and since the
+  # event never re-fires on a later push, the card stranded at "In progress" forever.
+  # (Observed: PR #337 -> issue #265. The flip fired at 03:13:18Z with ZERO runs scheduled;
+  # a run appeared 2s after the conflict was resolved and pushed, proving the branch's
+  # workflows were fine and only the conflict had suppressed them.) That is the worst case to
+  # drop silently: the Draft->ready flip is exactly when a long-lived branch is most likely to
+  # be behind main and conflicted.
+  #
+  # `pull_request_target` runs in the context of the BASE branch rather than the merge commit,
+  # so it needs no merge ref and is scheduled regardless of mergeability -- closing the gap
+  # while keeping the trigger at the SAME single one-shot event (see the "deliberately
+  # MINIMAL" note above). Adding `synchronize` was REJECTED as the fix: it would re-advance a
+  # card a developer had deliberately re-parked to "In progress" on their very next push --
+  # precisely the behaviour move-issue-in-progress.yml's not-started guard exists to avoid.
+  #
+  # SAFE despite the usual pull_request_target hazard: this workflow NEVER checks out or runs
+  # PR code. It only issues `gh api` calls keyed on the PR NUMBER (an integer from the event
+  # payload); no PR title / body / branch name is ever interpolated into a shell command.
+  # NOTE: the workflow file is read from the BASE branch, so edits here only take effect once
+  # merged to main (and cannot be tampered with from a PR branch -- a further win).
+  workflow_call:
+
+permissions:
+  pull-requests: read
+  issues: read
+
+# CONCURRENCY is set by each caller file, so the group holds within the calling
+# repository; the notes on it are kept here, beside the logic they protect.
+# Serialize runs for the SAME PR. `ready_for_review` fires at most once per draft->ready
+# transition, but a PR can in principle be flipped back to draft and forward again.
+
+env:
+  # See move-issue-in-progress.yml for why the project is targeted by fixed number while
+  # the Status field and its options are resolved BY NAME at run time (self-heals a rename).
+  PROJECT_NUMBER: 2
+  STATUS_FIELD_NAME: Status
+  FROM_STATUS_NAME: In progress
+  TO_STATUS_NAME: In review
+
+jobs:
+  move-linked-issues:
+    runs-on: ubuntu-latest
+    env:
+      OWNER: ${{ github.repository_owner }}
+      REPO: ${{ github.event.repository.name }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PAGE_CAP: 100
+    steps:
+      # A one-hour token for the MMW Automation GitHub App (D14 of mmw's plan 876). A repository
+      # without the app's key fails here, loudly, rather than skipping.
+      - name: Get a token for the MMW Automation app
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.MMW_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.MMW_AUTOMATION_PRIVATE_KEY }}
+          owner: mark-my-work
+      # A secret can't be read in an `if:` directly, so gate on a step OUTPUT instead.
+      - name: Check the PROJECT_TOKEN secret is available
+        id: token
+        env:
+          PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -uo pipefail
+          if [ -n "${PROJECT_TOKEN:-}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "PROJECT_TOKEN is not available -- skipping the In review move. Either the PAT secret is missing, OR this is a fork / Dependabot PR (GitHub does not expose Actions secrets to those runs, by design)."
+          fi
+
+      - name: Find issues this PR will close
+        id: linked
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # closingIssuesReferences can carry a CROSS-repo link, so also read each
+          # reference's repository and keep only refs in THIS repo (mirrors
+          # move-issue-in-progress.yml's identical read -- see that file for the full
+          # rationale on the NOT_FOUND/error posture and the null-repository guard).
+          if ! refs_json=$(gh api graphql -f query='
+              query($owner: String!, $repo: String!, $pr: Int!, $first: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $pr) {
+                    closingIssuesReferences(first: $first) {
+                      totalCount
+                      nodes { number repository { owner { login } name } }
+                    }
+                  }
+                }
+              }' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -F first="$PAGE_CAP"); then
+            echo "::error::could not read closing issue references for PR #$PR_NUMBER (gh's error is above). Failing the job so a persistent cause is visible rather than silently masked as 'no linked issues'."
+            exit 1
+          fi
+
+          total_refs=$(jq -r '.data.repository.pullRequest.closingIssuesReferences.totalCount // 0' <<<"$refs_json")
+          if [ "$total_refs" -gt "$PAGE_CAP" ]; then
+            echo "::warning::PR #$PR_NUMBER has $total_refs closing references but only the first $PAGE_CAP are read -- issues beyond that cap will NOT be advanced."
+          fi
+
+          numbers=$(jq -r '.data.repository.pullRequest.closingIssuesReferences.nodes[]?
+                  | select(((.repository.owner.login // "") | ascii_downcase) == (env.OWNER | ascii_downcase)
+                           and ((.repository.name // "") | ascii_downcase) == (env.REPO | ascii_downcase))
+                  | .number' <<<"$refs_json")
+          {
+            echo "numbers<<NUMBERS_EOF"
+            echo "$numbers"
+            echo "NUMBERS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Move each linked issue from "In progress" to "In review"
+        if: steps.linked.outputs.numbers != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NUMBERS: ${{ steps.linked.outputs.numbers }}
+        run: |
+          set -uo pipefail
+
+          # One query resolves the project's node id, its Status field id, BOTH the
+          # "In progress" and "In review" option ids by name, AND this repo's node id with
+          # the SAME PROJECT_TOKEN (see move-issue-in-progress.yml for why the repo read
+          # matters -- a token missing repo access would otherwise have every linked issue
+          # read as NOT_FOUND below and be silently swallowed as "not in the project").
+          if ! project_json=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $number: Int!, $statusField: String!) {
+                organization(login: $org) {
+                  projectV2(number: $number) {
+                    id
+                    field(name: $statusField) {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+                repository(owner: $org, name: $repo) { id }
+              }' -f org="$OWNER" -f repo="$REPO" -F number="$PROJECT_NUMBER" -f statusField="$STATUS_FIELD_NAME"); then
+            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER or the '$OWNER/$REPO' repository with PROJECT_TOKEN. Is the PAT valid and granted BOTH org Projects read AND access to this repo? gh's error is above."
+            exit 1
+          fi
+
+          # One value per line + mapfile (not @tsv + IFS=$'\t' read): an empty option id
+          # would otherwise collapse a consecutive-tab run and shift the remaining fields --
+          # see move-issue-in-progress.yml for the full explanation of this trap.
+          mapfile -t preflight_fields < <(jq -r --arg from "$FROM_STATUS_NAME" --arg to "$TO_STATUS_NAME" '
+            .data as $d
+            | $d.organization.projectV2 as $p
+            | ($p.id // ""),
+              ($p.field.id // ""),
+              ([$p.field.options[]? | select(.name == $from) | .id][0] // ""),
+              ([$p.field.options[]? | select(.name == $to) | .id][0] // ""),
+              ($d.repository.id // "")' <<<"$project_json")
+          project_id="${preflight_fields[0]:-}"
+          status_field_id="${preflight_fields[1]:-}"
+          from_option_id="${preflight_fields[2]:-}"
+          to_option_id="${preflight_fields[3]:-}"
+          repo_id="${preflight_fields[4]:-}"
+
+          if [ -z "$project_id" ] || [ -z "$status_field_id" ] || [ -z "$from_option_id" ] || [ -z "$to_option_id" ]; then
+            echo "::error::Could not resolve the MMW project / its '$STATUS_FIELD_NAME' field / its '$FROM_STATUS_NAME' or '$TO_STATUS_NAME' option by name -- was the board or field renamed or recreated?"
+            echo "$project_json" >&2
+            exit 1
+          fi
+
+          if [ -z "$repo_id" ]; then
+            echo "::error::PROJECT_TOKEN resolved the org project but CANNOT see '$OWNER/$REPO' -- it is missing repo access. Without it every linked issue reads as NOT_FOUND and no card would be advanced."
+            exit 1
+          fi
+
+          # A per-issue failure must not abort the rest of the batch, but must not pass
+          # silently either -- mirrors move-issue-in-progress.yml's tally.
+          failed=0
+          while IFS= read -r number; do
+            [ -z "$number" ] && continue
+
+            if ! item_json=$(gh api graphql -f query='
+                query($owner: String!, $repo: String!, $issue: Int!, $statusField: String!, $first: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    issue(number: $issue) {
+                      projectItems(first: $first) {
+                        totalCount
+                        nodes {
+                          id
+                          project { id }
+                          fieldValueByName(name: $statusField) {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }' -f owner="$OWNER" -f repo="$REPO" -F issue="$number" -f statusField="$STATUS_FIELD_NAME" -F first="$PAGE_CAP"); then
+              if jq -e 'any(.errors[]?; .type == "NOT_FOUND")' <<<"$item_json" >/dev/null 2>&1; then
+                echo "Issue #$number no longer exists in $OWNER/$REPO (deleted or transferred since it was linked) -- nothing to move."
+                continue
+              fi
+              echo "::warning::failed to query project item for #$number (gh's error is above)"
+              failed=1
+              continue
+            fi
+
+            IFS=$'\t' read -r item_id status <<<"$(jq -r --arg pid "$project_id" \
+              '[.data.repository.issue.projectItems.nodes[]? | select(.project.id == $pid)][0] | [.id, (.fieldValueByName.name // "")] | @tsv' <<<"$item_json")"
+
+            if [ -z "${item_id:-}" ]; then
+              # An issue in >100 projects may have had its MMW item truncated by the
+              # first:100 (unpaginated) cap rather than genuinely absent -- warn so a
+              # false "not in the project" is visible instead of a silent skip (mirrors
+              # move-issue-in-progress.yml).
+              item_projects_total=$(jq -r '.data.repository.issue.projectItems.totalCount // 0' <<<"$item_json")
+              if [ "$item_projects_total" -gt "$PAGE_CAP" ]; then
+                echo "::warning::#$number is in $item_projects_total projects but only the first $PAGE_CAP are read -- if its MMW item is beyond that cap it is wrongly treated as 'not in the project'. Paginate projectItems (or raise PAGE_CAP) if this is ever hit."
+              fi
+              echo "Issue #$number is not in the MMW project -- nothing to move."
+              continue
+            fi
+
+            # Deliberately narrow: only advance an issue whose CURRENT Status is exactly
+            # "In progress" -- not a not-started column, not "no status", not any other
+            # column. Every other case is left for a developer to move by hand.
+            if [ "$status" != "$FROM_STATUS_NAME" ]; then
+              echo "Issue #$number Status is '${status:-<none>}' -- leaving as-is (only advancing from '$FROM_STATUS_NAME')."
+              continue
+            fi
+
+            if ! gh api graphql -f query='
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId
+                    itemId: $itemId
+                    fieldId: $fieldId
+                    value: { singleSelectOptionId: $optionId }
+                  }) {
+                    projectV2Item { id }
+                  }
+                }' \
+              -f projectId="$project_id" -f itemId="$item_id" \
+              -f fieldId="$status_field_id" -f optionId="$to_option_id"; then
+              echo "::warning::failed to move #$number to '$TO_STATUS_NAME' (gh's error is above). If EVERY linked issue fails this way, PROJECT_TOKEN likely has Projects: READ but not WRITE."
+              failed=1
+              continue
+            fi
+            echo "Moved #$number to '$TO_STATUS_NAME'."
+          done <<< "$NUMBERS"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::One or more linked issues could not be moved to '$TO_STATUS_NAME' -- see the warnings above."
+            exit 1
+          fi

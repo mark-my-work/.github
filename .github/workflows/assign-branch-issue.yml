@@ -1,0 +1,108 @@
+name: Assign issue on branch creation
+
+# When a branch is created following this repo's naming convention
+# (<issue-number>-<kebab-title>, see docs/claude/workflow.md), assign the
+# named issue to whoever created the branch -- whether via `git push`, the
+# GitHub web UI, or the issue's own "Create a branch" link. A branch name
+# with no leading issue number is silently skipped.
+
+on:
+  # Each repository's caller file sets the real trigger and the concurrency group, and
+  # calls this file with `secrets: inherit`. The notes on the trigger are kept here.
+  workflow_call:
+
+permissions:
+  issues: write
+
+jobs:
+  assign-branch-issue:
+    if: github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      BRANCH: ${{ github.event.ref }}
+      ACTOR: ${{ github.actor }}
+    steps:
+      - name: Assign the issue named by the branch
+        run: |
+          set -uo pipefail
+          number="${BRANCH%%-*}"
+          # Require the documented <issue-number>-<kebab-title> shape: a leading issue
+          # number (no leading zero -- GitHub issue numbers are never zero-padded), a
+          # '-', THEN at least one title character. Rejects a branch with no leading
+          # number, a bare number (e.g. `1234`), a number with an empty title (e.g.
+          # `1234-`), and a zero-padded prefix (e.g. `007-foo`, which the `-F number=`
+          # typed field below would otherwise coerce to issue #7 -- an unrelated issue).
+          if [[ ! "$BRANCH" =~ ^[1-9][0-9]*-. ]]; then
+            echo "Branch '$BRANCH' is not an <issue-number>-<kebab-title> branch -- skipping."
+            exit 0
+          fi
+          # Reject a number outside GitHub's 32-bit signed issue-number range. `-F number=`
+          # below sends it as a GraphQL Int!, and an out-of-range value is a COERCION error
+          # (not a NOT_FOUND), which the triage further down would REDDEN -- failing this
+          # one-shot `create` job for a branch whose leading digits merely overflow Int.
+          # Check digit LENGTH first (>10 digits is unconditionally out of range) so the
+          # numeric compare can't itself overflow bash's 64-bit arithmetic.
+          if [ "${#number}" -gt 10 ] || [ "$number" -gt 2147483647 ]; then
+            echo "Branch '$BRANCH' -> #$number exceeds GitHub's maximum issue number -- skipping."
+            exit 0
+          fi
+          # Bots and GitHub Apps (actor login ending in "[bot]") are NOT assignable to
+          # issues, so a bot-created branch could never be assigned. Skip those quietly
+          # HERE -- BEFORE the issue-existence query below -- so a bot branch that happens
+          # to match the <issue>-<title> shape can't redden this one-shot `create` job on a
+          # transient API error while verifying an assignment that could never succeed
+          # anyway. (Branches bots push rarely match the shape, but guard it explicitly
+          # rather than relying on that.)
+          case "$ACTOR" in
+            *'[bot]')
+              echo "Branch creator '$ACTOR' is a bot/app account (not assignable) -- skipping #$number."
+              exit 0
+              ;;
+          esac
+          # Confirm the number names a real ISSUE before assigning. We query it via
+          # GraphQL rather than `gh issue view`: `gh issue view <n>` transparently
+          # resolves a PR with that number too (issues and PRs share one number space),
+          # so it would fail to skip a branch whose leading digits are a PR, not an
+          # issue. GraphQL's issue(number:) returns a NOT_FOUND error for a PR or a
+          # missing number -- which also lets us tell "not an issue" (skip quietly)
+          # apart from a transient API error (surface it; never misreport a rate-limit /
+          # 5xx as "no such issue" and silently drop the assignment).
+          owner="${GH_REPO%%/*}"
+          name="${GH_REPO#*/}"
+          # gh's stderr is deliberately NOT redirected to /dev/null: on a transient/HTTP
+          # failure we want gh's actionable error in the step log (the sibling workflows
+          # keep it the same way, "gh's error is above"). The JSON body -- including any
+          # `.errors` we parse below for NOT_FOUND -- still comes back on stdout.
+          resp=$(gh api graphql \
+            -f query='query($owner: String!, $name: String!, $number: Int!) {
+                repository(owner: $owner, name: $name) { issue(number: $number) { number } }
+              }' \
+            -f owner="$owner" -f name="$name" -F number="$number")
+          # `jq -e` exits 0 only when the issue resolved to a real number; a null (a PR /
+          # missing number) or a malformed response exits non-zero and falls through to the
+          # NOT_FOUND-vs-transient-error triage below. (Issue numbers are always positive,
+          # so `.number` is never a falsy 0.)
+          if ! jq -e '.data.repository.issue.number' <<<"$resp" >/dev/null 2>&1; then
+            if jq -e 'any(.errors[]?; .type == "NOT_FOUND")' <<<"$resp" >/dev/null 2>&1; then
+              echo "Branch '$BRANCH' -> #$number is not an existing issue (a PR or missing number) -- skipping."
+              exit 0
+            fi
+            # Neither a resolved issue nor a clean NOT_FOUND: an unexpected/transient API
+            # response. REDDEN the job (do NOT exit 0 green) so the failure is visible --
+            # `create` fires once per branch and never re-fires, so a silent skip here
+            # would drop the assignment permanently with no signal. gh's error is in the
+            # step log above; re-run the failed job from the Actions UI (it replays the
+            # same create payload against the existing branch) once the API recovers.
+            echo "::error::could not verify #$number is an issue (branch $BRANCH) -- unexpected API response (gh's error is above); not assigning. Response: ${resp:0:300}"
+            exit 1
+          fi
+          # A failed assignment reddens the job so it is never lost silently. `create` is
+          # one-shot (no schedule/workflow_dispatch), so there is no automatic retry:
+          # recover by re-running the failed job from the Actions UI (it replays the same
+          # create payload against the existing branch) once the cause is fixed.
+          if ! gh issue edit "$number" --add-assignee "$ACTOR"; then
+            echo "::error::Could not assign #$number to '$ACTOR' (branch $BRANCH) -- the assignment edit failed. Is '$ACTOR' an account that can be assigned to issues in $GH_REPO (a member/collaborator with repo access, not an outside or app account)?"
+            exit 1
+          fi
