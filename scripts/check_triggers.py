@@ -16,7 +16,7 @@ import yaml
 
 # pull_request gives an outsider's run no secrets; only members can push, dispatch or edit a
 # schedule; a workflow_call workflow runs in the repository that calls it.
-ALLOWED = {"workflow_call", "schedule", "workflow_dispatch", "push", "pull_request"}
+ALLOWED = {"workflow_call", "schedule", "workflow_dispatch", "push", "pull_request", "issue_comment"}
 
 
 def triggers(workflow: dict) -> set[str]:
