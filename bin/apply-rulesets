@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Creates or updates each organization ruleset in rulesets/*.json, matched by its name, so
+# the files are the one definition of the rulesets. A ruleset in the organization that no
+# file names is reported and left alone.
+# A file names .github's repository id as the string "SETUP_REPO_ID"; it is filled in here.
+# Usage: bin/apply-rulesets
+set -euo pipefail
+
+ORG=mark-my-work
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+setup_repo_id=$(gh api "repos/$ORG/.github" --jq .id)
+existing=$(gh api "orgs/$ORG/rulesets" --paginate --jq '.[] | [.name, .id] | @tsv')
+
+declare -A named=()
+for file in "$ROOT"/rulesets/*.json; do
+  body=$(jq --argjson id "$setup_repo_id" \
+    'walk(if type == "object" and .repository_id == "SETUP_REPO_ID" then .repository_id = $id else . end)' "$file")
+  name=$(jq -r .name <<<"$body")
+  named[$name]=1
+  id=$(awk -F'\t' -v n="$name" '$1 == n { print $2 }' <<<"$existing")
+  if [ -n "$id" ]; then
+    gh api -X PUT "orgs/$ORG/rulesets/$id" --input - <<<"$body" >/dev/null
+    echo "Updated ruleset $name ($id)."
+  else
+    gh api -X POST "orgs/$ORG/rulesets" --input - <<<"$body" >/dev/null
+    echo "Created ruleset $name."
+  fi
+done
+
+while IFS=$'\t' read -r name id; do
+  [ -n "$name" ] || continue
+  [ -n "${named[$name]:-}" ] || echo "Ruleset $name ($id) is in the organization but in no file; left unchanged."
+done <<<"$existing"

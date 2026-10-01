@@ -1,0 +1,41 @@
+{
+  "name": "github-repo-checks",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "~DEFAULT_BRANCH"
+      ],
+      "exclude": []
+    },
+    "repository_name": {
+      "include": [
+        ".github"
+      ],
+      "exclude": [],
+      "protected": false
+    }
+  },
+  "rules": [
+    {
+      "type": "workflows",
+      "parameters": {
+        "do_not_enforce_on_create": true,
+        "workflows": [
+          {
+            "path": ".github/workflows/check-triggers.yml",
+            "repository_id": "SETUP_REPO_ID",
+            "ref": "refs/heads/main"
+          },
+          {
+            "path": ".github/workflows/test.yml",
+            "repository_id": "SETUP_REPO_ID",
+            "ref": "refs/heads/main"
+          }
+        ]
+      }
+    }
+  ]
+}
