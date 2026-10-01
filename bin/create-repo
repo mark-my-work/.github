@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Creates a private mark-my-work repository with the standard setup: the starting files from
+# .github-template, the organization's merge settings, write access for one team, and the
+# MMW Automation app's key. Safe to run again: each step skips work already done.
+# Usage: bin/create-repo <name> --team <team-slug>
+set -euo pipefail
+
+ORG=mark-my-work
+TEMPLATE="$ORG/.github-template"
+SECRET=MMW_AUTOMATION_PRIVATE_KEY
+GUIDE="docs/guides/Creating an MMW GitHub Repository.md, in $ORG/mmw"
+
+die() { echo "create-repo: $*" >&2; exit 1; }
+usage="usage: create-repo <name> --team <team-slug>"
+
+name="" team=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --team) team=${2:?$usage}; shift 2 ;;
+    -*) die "$usage" ;;
+    *) [ -z "$name" ] || die "$usage"; name=$1; shift ;;
+  esac
+done
+if [ -z "$name" ] || [ -z "$team" ]; then die "$usage"; fi
+
+# 1. The person running this must be an org owner with the scopes the steps below use.
+login=$(gh api user --jq .login) || die "gh is not signed in: run gh auth login"
+role=$(gh api "orgs/$ORG/memberships/$login" --jq .role 2>/dev/null) || role=none
+[ "$role" = admin ] || die "$login is not an owner of $ORG (role: $role); only owners create repositories"
+scopes=$(gh api -i user | tr -d '\r' | awk -F': ' 'tolower($1) == "x-oauth-scopes" { print $2 }')
+for scope in repo admin:org; do
+  grep -qE "(^|, )$scope(,|$)" <<<"$scopes" || die "gh's token lacks the '$scope' scope: run gh auth refresh -s $scope"
+done
+
+# 2. The repository, from the template.
+if archived=$(gh repo view "$ORG/$name" --json isArchived --jq .isArchived 2>/dev/null); then
+  [ "$archived" = false ] || die "$ORG/$name exists and is archived; choose another name or unarchive it first"
+  echo "$ORG/$name exists; not creating it."
+else
+  gh repo create "$ORG/$name" --private --template "$TEMPLATE" >/dev/null
+  echo "Created $ORG/$name from $TEMPLATE."
+fi
+
+# 3. Merge commits only, branches deleted on merge, no auto-merge.
+gh api -X PATCH "repos/$ORG/$name" -F allow_merge_commit=true -F allow_squash_merge=false \
+  -F allow_rebase_merge=false -F delete_branch_on_merge=true -F allow_auto_merge=false >/dev/null
+echo "Set the merge settings."
+
+# 4. Write access through the team, created if it does not exist.
+if ! gh api "orgs/$ORG/teams/$team" --jq .slug >/dev/null 2>&1; then
+  gh api -X POST "orgs/$ORG/teams" -f name="$team" -f privacy=closed >/dev/null
+  echo "Created the team $team."
+fi
+gh api -X PUT "orgs/$ORG/teams/$team/repos/$ORG/$name" -f permission=push >/dev/null
+echo "Gave $team write access."
+
+# 5. The MMW Automation app's key, which the board workflows need, is shared with listed
+#    repositories only. The app itself is installed on every repository.
+repo_id=$(gh api "repos/$ORG/$name" --jq .id)
+gh api -X PUT "orgs/$ORG/actions/secrets/$SECRET/repositories/$repo_id" >/dev/null
+echo "Shared $SECRET with $ORG/$name."
+
+cat <<MSG
+
+$ORG/$name is created. The steps done by hand are in $GUIDE:
+  1. For a new part of the company: add its label to the organization's default labels and to $ORG/mmw.
+  2. On the MMW board, add an "Auto-add to project" workflow for $name.
+  3. Add people to the team $team.
+  4. Complete README.md and CLAUDE.md.
+MSG
