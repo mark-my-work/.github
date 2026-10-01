@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Creates a private mark-my-work repository with the standard setup: the starting files from
+# .github-template, the organization's merge settings, write access for one team, and the
+# MMW Automation app's key. Safe to run again: it creates only what does not exist yet and
+# re-applies the settings, the team's access and the key's sharing every run.
+# Usage: bin/create-repo <name> --team <team-slug>
+set -euo pipefail
+
+ORG=mark-my-work
+TEMPLATE="$ORG/.github-template"
+SECRET=MMW_AUTOMATION_PRIVATE_KEY
+GUIDE="docs/guides/Creating an MMW GitHub Repository.md, in $ORG/mmw"
+
+die() { echo "create-repo: $*" >&2; exit 1; }
+usage="usage: create-repo <name> --team <team-slug>"
+
+name="" team=""
+while [ $# -gt 0 ]; do
+  case $1 in
+    --team) { [ $# -ge 2 ] && [[ $2 != -* ]]; } || die "$usage"; team=$2; shift 2 ;;
+    -*) die "$usage" ;;
+    *) [ -z "$name" ] || die "$usage"; name=$1; shift ;;
+  esac
+done
+if [ -z "$name" ] || [ -z "$team" ]; then die "$usage"; fi
+# A team is addressed by its slug, which GitHub derives from the name; taking the slug itself
+# keeps the lookup, the creation and the grant naming the same team.
+[[ $team =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--team takes a team slug (lower-case letters, digits and hyphens, such as 'marketing'). $usage"
+[[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "the repository name may hold only letters, digits, '.', '_' and '-'. $usage"
+
+# api_get <var> <path> <jq>: sets var to the result and returns 0; returns 1 when GitHub
+# answers 404; stops the run, with gh's reason, on any other failure. Call it directly, not
+# in $(...), so the stop ends the run.
+api_get() {
+  local out err
+  err=$(mktemp)
+  if out=$(gh api "$2" --jq "$3" 2>"$err"); then
+    rm -f "$err"; printf -v "$1" '%s' "$out"; return 0
+  fi
+  if grep -q 'HTTP 404' "$err"; then rm -f "$err"; return 1; fi
+  echo "create-repo: gh api $2 failed: $(head -c 300 "$err")" >&2
+  rm -f "$err"
+  exit 1
+}
+
+# 1. The person running this must be an org owner with the scopes the steps below use.
+login="" role=none
+api_get login user .login || die "gh is not signed in: run gh auth login"
+api_get role "orgs/$ORG/memberships/$login" .role || role=none
+[ "$role" = admin ] || die "$login is not an owner of $ORG (role: $role); only owners create repositories"
+scopes=$(gh api -i user | tr -d '\r' | awk -F': ' 'tolower($1) == "x-oauth-scopes" { print $2 }')
+for scope in repo admin:org; do
+  grep -qE "(^|, )$scope(,|$)" <<<"$scopes" || die "gh's token lacks the '$scope' scope: run gh auth refresh -s $scope"
+done
+
+# 2. The repository, from the template. An existing one is used only if this command made it:
+#    private and created from the template.
+state=""
+if api_get state "repos/$ORG/$name" '"\(.archived) \(.private) \(.template_repository.full_name // "none")"'; then
+  read -r archived private from <<<"$state"
+  [ "$archived" = false ] || die "$ORG/$name exists and is archived; choose another name or unarchive it first"
+  if [ "$private" != true ] || [ "$from" != "$TEMPLATE" ]; then
+    die "$ORG/$name exists and was not created by create-repo (private: $private, template: $from); choose another name"
+  fi
+  echo "$ORG/$name exists; not creating it."
+else
+  gh repo create "$ORG/$name" --private --template "$TEMPLATE" >/dev/null
+  echo "Created $ORG/$name from $TEMPLATE."
+fi
+
+# 3. Merge commits only, branches deleted on merge, no auto-merge.
+gh api -X PATCH "repos/$ORG/$name" -F allow_merge_commit=true -F allow_squash_merge=false \
+  -F allow_rebase_merge=false -F delete_branch_on_merge=true -F allow_auto_merge=false >/dev/null
+echo "Set the merge settings."
+
+# 4. Write access through the team, created if it does not exist.
+team_slug=""
+if ! api_get team_slug "orgs/$ORG/teams/$team" .slug; then
+  gh api -X POST "orgs/$ORG/teams" -f name="$team" -f privacy=closed >/dev/null
+  echo "Created the team $team."
+fi
+gh api -X PUT "orgs/$ORG/teams/${team_slug:-$team}/repos/$ORG/$name" -f permission=push >/dev/null
+echo "Gave $team write access."
+
+# 5. The MMW Automation app's key, which the board workflows need, is shared with listed
+#    repositories only. The app itself is installed on every repository.
+repo_id=""
+api_get repo_id "repos/$ORG/$name" .id || die "$ORG/$name was not found after it was created"
+gh api -X PUT "orgs/$ORG/actions/secrets/$SECRET/repositories/$repo_id" >/dev/null
+echo "Shared $SECRET with $ORG/$name."
+
+cat <<MSG
+
+$ORG/$name is created. The steps done by hand are in $GUIDE:
+  1. For a new part of the company: add its label to the organization's default labels and to $ORG/mmw.
+  2. On the MMW board, add an "Auto-add to project" workflow for $name.
+  3. Add people to the team $team.
+  4. Remove yourself from the team $team if you do not work in $name: GitHub makes whoever creates a team its maintainer.
+  5. Install the Claude Code plugins that .claude/settings.json enables: enabling a plugin does not install it.
+  6. Complete README.md and CLAUDE.md.
+MSG

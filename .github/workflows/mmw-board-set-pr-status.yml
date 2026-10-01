@@ -1,0 +1,275 @@
+name: Set PR status (MMW board)
+
+# Drive a PULL REQUEST's own Status card on the org-level "MMW" Project (v2, #2) from its
+# lifecycle events -- the PR-side analogue of mmw-board-move-issue-in-progress.yml (which drives the
+# linked ISSUE). The two never fight: this workflow only ever reads/writes the PR's OWN
+# project item, never an issue's.
+#
+# KNOWN GAP (deliberate, issue mark-my-work/mmw#399 review cycle 2): because it never touches an issue card, a
+# `converted_to_draft` sends the PR to Backlog but leaves the linked issue at "In review" for the
+# duration of the draft (though it is really being reworked). It reads correctly again the moment
+# the PR is re-flipped to ready. Accepted (kept PR-only + minimal, per the deliberately-minimal
+# issue automation) rather than have this workflow also drive issue cards -- move it by hand if a
+# draft period is long enough to matter.
+#
+# PR Status lifecycle (issue mark-my-work/mmw#399 §2): Backlog (draft) -> Ready for work (ready-for-review)
+# -> In progress (reviewing) -> Done (merged/closed). This workflow owns:
+#   opened/reopened while DRAFT, or converted_to_draft -> Backlog
+#   opened/reopened while NON-draft, or ready_for_review -> Ready for work
+#   closed WITHOUT merging (abandoned)                  -> Done
+# The other two are owned elsewhere, deliberately, to avoid two things driving one value:
+#   In progress (reviewing) -> mmw-board-pr-review-status.yml (a submitted review)
+#   Done (MERGED)           -> the built-in "Pull request merged" Project workflow
+# So the `closed` arm here handles ONLY the closed-without-merge case (a merged PR is left to the
+# built-in). Without it an abandoned PR would linger in an active column until the weekly
+# Auto-archive sweep; sending it to Done clears the working board at once (Auto-archive's
+# `is:pr is:closed` filter still catches it either way). A PR never uses "In review" -- the PR
+# IS the review (issue mark-my-work/mmw#399 §2).
+#
+# Authenticates as the MMW Automation GitHub App: a one-hour token limited to this repository,
+# with organization Projects read and write and Pull requests read (it reads the PR's project
+# item via `repository.pullRequest(...)`). A repository without the app's key fails at the
+# token step rather than skipping; a run Dependabot triggers gets no Actions secrets, so the
+# job skips Dependabot.
+
+on:
+  # Each repository's caller file sets the real trigger and the concurrency group, and
+  # calls this file with `secrets: inherit`. The notes on the trigger are kept here.
+  # pull_request_target, NOT pull_request -- deliberate and load-bearing, exactly as in
+  # mmw-board-move-issue-in-review.yml (see that file's long header): GitHub will not schedule a
+  # `pull_request` run for a PR with a merge conflict (it can't compute the merge commit), so a
+  # draft->ready flip WHILE CONFLICTED would silently never move the card. pull_request_target
+  # runs in the BASE branch context, needs no merge ref, and fires regardless of mergeability.
+  # SAFE because this workflow never checks out or executes PR code -- it only issues `gh api`
+  # calls keyed on the PR NUMBER (an integer from the event payload). The caller file is read
+  # from the calling repository's base branch and calls this file at mark-my-work/.github@main,
+  # so an edit here takes effect in every repository once merged to .github's main.
+  workflow_call:
+
+permissions:
+  pull-requests: read
+
+# CONCURRENCY is set by each caller file, so the group holds within the calling
+# repository; the notes on it are kept here, beside the logic they protect.
+# Serialize ALL PR-card writes for the SAME PR. The group is SHARED with mmw-board-pr-review-status.yml
+# (both use `pr-board-<n>`) so a lifecycle event and a review event can't race the same card to
+# conflicting values (e.g. a ready_for_review flip interleaving a submitted review). Serializing
+# across the two workflows is why the group name is not workflow-specific.
+#
+# ACCEPTED GAP: GitHub keeps only ONE pending run per group and cancels the older pending run when
+# a newer one queues, so a still-pending run in this shared group can be dropped by a newer
+# same-group event. Harmless for THIS workflow (its lifecycle events recur and self-correct), but
+# see mmw-board-pr-review-status.yml's concurrency note for the one-shot review-run case the sharing strands.
+
+env:
+  # Target the project by fixed number; resolve the Status field + its options BY NAME at run
+  # time so a rename (e.g. mark-my-work/mmw#399's "Ready for Dev" -> "Ready for work") self-heals.
+  PROJECT_NUMBER: 2
+  STATUS_FIELD_NAME: Status
+  BACKLOG_STATUS_NAME: Backlog
+  READY_STATUS_NAME: Ready for work
+  IN_PROGRESS_STATUS_NAME: In progress
+  DONE_STATUS_NAME: Done
+
+jobs:
+  set-pr-status:
+    # A run Dependabot triggers gets no Actions secrets, so the token step would fail it.
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    env:
+      OWNER: ${{ github.repository_owner }}
+      REPO: ${{ github.event.repository.name }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_IS_DRAFT: ${{ github.event.pull_request.draft }}
+      PR_MERGED: ${{ github.event.pull_request.merged }}
+      EVENT_ACTION: ${{ github.event.action }}
+      PAGE_CAP: 100
+    steps:
+      # A one-hour token for the MMW Automation GitHub App (D14 of mark-my-work/mmw's plan 876),
+      # limited to this repository and to the permissions this workflow uses. A repository
+      # without the app's key fails here, loudly, rather than skipping.
+      - name: Get a token for the MMW Automation app
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.MMW_AUTOMATION_CLIENT_ID }}
+          private-key: ${{ secrets.MMW_AUTOMATION_PRIVATE_KEY }}
+          owner: mark-my-work
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: read
+          permission-organization-projects: write
+      - name: Set the PR's Status from its lifecycle event
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -uo pipefail
+
+          # 1) Decide the target column from the event action + draft state.
+          case "$EVENT_ACTION" in
+            closed)
+              # merged -> Done is owned by the built-in "Pull request merged" workflow; only a
+              # PR closed WITHOUT merging (abandoned) is handled here -> Done, so it leaves the
+              # active columns at once instead of lingering until the weekly Auto-archive sweep.
+              if [ "$PR_MERGED" = "true" ]; then
+                echo "PR #$PR_NUMBER was merged -- 'Done' is set by the built-in 'Pull request merged' workflow. Nothing to do."
+                exit 0
+              fi
+              target_name="$DONE_STATUS_NAME" ;;
+            converted_to_draft)
+              target_name="$BACKLOG_STATUS_NAME" ;;
+            ready_for_review)
+              target_name="$READY_STATUS_NAME" ;;
+            opened|reopened)
+              if [ "$PR_IS_DRAFT" = "true" ]; then
+                target_name="$BACKLOG_STATUS_NAME"
+              else
+                target_name="$READY_STATUS_NAME"
+              fi ;;
+            *)
+              echo "Unexpected action '$EVENT_ACTION' -- this workflow only handles opened/reopened/ready_for_review/converted_to_draft/closed. Nothing to do."
+              exit 0 ;;
+          esac
+          echo "PR #$PR_NUMBER ($EVENT_ACTION, draft=$PR_IS_DRAFT) -> target Status '$target_name'."
+
+          # 2) Preflight: resolve the project id, the Status field id, the candidate option
+          #    ids by name, and this repo's node id -- all with the app token.
+          # The preflight ALSO reads `pullRequest(number:){ id }` so an app token missing the
+          # Pull requests read permission this workflow needs fails HERE (naming it) instead of
+          # later at the item query with a generic error.
+          if ! project_json=$(gh api graphql -f query='
+              query($org: String!, $repo: String!, $number: Int!, $statusField: String!, $pr: Int!) {
+                organization(login: $org) {
+                  projectV2(number: $number) {
+                    id
+                    field(name: $statusField) {
+                      ... on ProjectV2SingleSelectField { id options { id name } }
+                    }
+                  }
+                }
+                repository(owner: $org, name: $repo) { id pullRequest(number: $pr) { id } }
+              }' -f org="$OWNER" -f repo="$REPO" -F number="$PROJECT_NUMBER" -f statusField="$STATUS_FIELD_NAME" -F pr="$PR_NUMBER"); then
+            echo "::error::Could not read the '$OWNER' org project #$PROJECT_NUMBER, the '$OWNER/$REPO' repository, or PR #$PR_NUMBER with the MMW Automation app token. Is the app installed on '$OWNER/$REPO', with organization Projects read and write and Pull requests read? gh's error is above."
+            exit 1
+          fi
+
+          # One value per line + mapfile (never @tsv/IFS): an empty option id would collapse a
+          # tab run and shift fields -- the trap documented in mmw-board-move-issue-in-progress.yml.
+          # Resolve the Backlog/Ready/Done WRITE-target ids, AND the "In progress" option id purely
+          # as a fail-loud CANARY: the reopen-downgrade guard below compares that status by NAME, so
+          # a rename of "In progress" would otherwise SILENTLY disable the guard. Validating it here
+          # makes such a rename fail loud (as the write-target renames already do). Also capture the
+          # PR node id for the scope check below.
+          mapfile -t preflight < <(jq -r --arg backlog "$BACKLOG_STATUS_NAME" --arg ready "$READY_STATUS_NAME" --arg donestatus "$DONE_STATUS_NAME" --arg inprog "$IN_PROGRESS_STATUS_NAME" '
+            .data as $d
+            | $d.organization.projectV2 as $p
+            | ($p.id // ""),
+              ($p.field.id // ""),
+              ([$p.field.options[]? | select(.name == $backlog) | .id][0] // ""),
+              ([$p.field.options[]? | select(.name == $ready) | .id][0] // ""),
+              ([$p.field.options[]? | select(.name == $donestatus) | .id][0] // ""),
+              ([$p.field.options[]? | select(.name == $inprog) | .id][0] // ""),
+              ($d.repository.id // ""),
+              ($d.repository.pullRequest.id // "")' <<<"$project_json")
+          project_id="${preflight[0]:-}"
+          status_field_id="${preflight[1]:-}"
+          backlog_option_id="${preflight[2]:-}"
+          ready_option_id="${preflight[3]:-}"
+          done_option_id="${preflight[4]:-}"
+          in_progress_option_id="${preflight[5]:-}"  # canary only -- reopen guard compares by name
+          repo_id="${preflight[6]:-}"
+          pr_node_id="${preflight[7]:-}"
+
+          if [ -z "$project_id" ] || [ -z "$status_field_id" ] || [ -z "$backlog_option_id" ] || [ -z "$ready_option_id" ] || [ -z "$done_option_id" ] || [ -z "$in_progress_option_id" ]; then
+            echo "::error::Could not resolve the MMW project / its '$STATUS_FIELD_NAME' field / its '$BACKLOG_STATUS_NAME', '$READY_STATUS_NAME', '$DONE_STATUS_NAME', or '$IN_PROGRESS_STATUS_NAME' option by name -- was the board or field renamed or recreated? ('$IN_PROGRESS_STATUS_NAME' is validated here as a fail-loud canary for the reopen-downgrade guard, which compares it by name.)"
+            echo "$project_json" >&2
+            exit 1
+          fi
+          if [ -z "$repo_id" ]; then
+            echo "::error::The MMW Automation app token resolved the org project but CANNOT see '$OWNER/$REPO' -- the app is not installed on it, so the PR item below would read as NOT_FOUND."
+            exit 1
+          fi
+          if [ -z "$pr_node_id" ]; then
+            echo "::error::The MMW Automation app token can see '$OWNER/$REPO' but NOT PR #$PR_NUMBER -- the app lacks Pull requests read (this workflow reads the PR's project item). Without it the PR read below fails."
+            exit 1
+          fi
+
+          case "$target_name" in
+            "$BACKLOG_STATUS_NAME") target_option_id="$backlog_option_id" ;;
+            "$READY_STATUS_NAME")   target_option_id="$ready_option_id" ;;
+            "$DONE_STATUS_NAME")    target_option_id="$done_option_id" ;;
+          esac
+
+          # 3) Find the PR's OWN item on the MMW board and its current Status.
+          if ! item_json=$(gh api graphql -f query='
+              query($owner: String!, $repo: String!, $pr: Int!, $statusField: String!, $first: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $pr) {
+                    projectItems(first: $first) {
+                      totalCount
+                      nodes {
+                        id
+                        project { id }
+                        fieldValueByName(name: $statusField) {
+                          ... on ProjectV2ItemFieldSingleSelectValue { name }
+                        }
+                      }
+                    }
+                  }
+                }
+              }' -f owner="$OWNER" -f repo="$REPO" -F pr="$PR_NUMBER" -f statusField="$STATUS_FIELD_NAME" -F first="$PAGE_CAP"); then
+            echo "::error::Could not query project items for PR #$PR_NUMBER (gh's error is above)."
+            exit 1
+          fi
+
+          IFS=$'\t' read -r item_id status <<<"$(jq -r --arg pid "$project_id" \
+            '[.data.repository.pullRequest.projectItems.nodes[]? | select(.project.id == $pid)][0] | [.id, (.fieldValueByName.name // "")] | @tsv' <<<"$item_json")"
+
+          if [ -z "${item_id:-}" ]; then
+            # Not on the board yet: the built-in "Auto-add to project" workflow races this run and
+            # may not have created the card before this query. For a DRAFT open, or a
+            # converted_to_draft / ready_for_review / closed event, a later lifecycle event re-runs
+            # this and corrects it. KNOWN GAP (as in mmw-board-move-issue-in-progress.yml): a PR opened
+            # DIRECTLY as NON-draft that never changes draft state and is never closed has no
+            # further lifecycle event (ready_for_review fires only on draft->ready; synchronize is
+            # not a trigger), so if it loses this one race it stays in the auto-add default column
+            # until a manual nudge. Auto-add almost always wins (Actions startup latency), and the
+            # repo's draft-early convention means most PRs open as draft and self-heal. A stale
+            # (>PAGE_CAP-projects) truncation is possible but astronomically unlikely for a PR.
+            pr_projects_total=$(jq -r '.data.repository.pullRequest.projectItems.totalCount // 0' <<<"$item_json")
+            if [ "$pr_projects_total" -gt "$PAGE_CAP" ]; then
+              echo "::warning::PR #$PR_NUMBER is in $pr_projects_total projects but only the first $PAGE_CAP are read -- if its MMW item is beyond that cap it is wrongly treated as 'not on the board'. Paginate projectItems (or raise PAGE_CAP) if this is ever hit."
+            fi
+            echo "PR #$PR_NUMBER is not on the MMW board yet (auto-add likely still in flight) -- leaving it for the next lifecycle event to set."
+            exit 0
+          fi
+
+          if [ "$status" = "$target_name" ]; then
+            echo "PR #$PR_NUMBER is already '$target_name' -- nothing to do."
+            exit 0
+          fi
+
+          # Never let a (re)open DOWNGRADE a PR already under review. With closed-without-merge ->
+          # Done handled above, an "In progress" PR is always OPEN, so a reopen can't legitimately
+          # reach one -- this guards against event reordering and keeps the "avoid two things
+          # driving one value" invariant honest (a submitted review owns In progress, not this).
+          if { [ "$EVENT_ACTION" = "opened" ] || [ "$EVENT_ACTION" = "reopened" ]; } && [ "$status" = "$IN_PROGRESS_STATUS_NAME" ]; then
+            echo "PR #$PR_NUMBER is already '$IN_PROGRESS_STATUS_NAME' -- leaving as-is (a (re)open won't downgrade a PR under review)."
+            exit 0
+          fi
+
+          # 4) Set it.
+          if ! gh api graphql -f query='
+              mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $projectId
+                  itemId: $itemId
+                  fieldId: $fieldId
+                  value: { singleSelectOptionId: $optionId }
+                }) { projectV2Item { id } }
+              }' \
+            -f projectId="$project_id" -f itemId="$item_id" \
+            -f fieldId="$status_field_id" -f optionId="$target_option_id"; then
+            echo "::error::Failed to set PR #$PR_NUMBER to '$target_name' (gh's error is above). If this fails for every PR, the MMW Automation app likely has organization Projects read but not write."
+            exit 1
+          fi
+          echo "Set PR #$PR_NUMBER Status '${status:-<none>}' -> '$target_name'."

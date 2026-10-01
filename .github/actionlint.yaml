@@ -1,0 +1,21 @@
+# actionlint config. See https://github.com/rhysd/actionlint/blob/main/docs/config.md
+#
+# The board-automation workflows drive the GitHub Project via `gh api graphql -f query='…'`. Inside those
+# single-quoted GraphQL documents, `$owner` / `$number` / `$issue` are GRAPHQL variables — the shell must
+# NOT expand them — so shellcheck's SC2016 ("expressions don't expand in single quotes") is a false positive
+# at every one of its sites, and single quotes are the correct, required quoting there.
+#
+# It is suppressed rather than tolerated because `actionlint .github/workflows/*.yml` otherwise exits 1 with
+# a standing wall of known-benign findings, behind which a REAL error arrives with no change in exit
+# status, which is how a genuine defect goes unnoticed. Scoped by message so every other shellcheck rule —
+# and every other actionlint check — still fails the sweep loudly.
+paths:
+  .github/workflows/**:
+    ignore:
+      - 'shellcheck reported issue in this script: SC2016:'
+      # actionlint 1.7.12's built-in data for actions/create-github-app-token@v3 predates v3.1.0,
+      # which added `client-id` and made `app-id` (now deprecated) optional -- see that action's
+      # own action.yml. Scoped to those two messages about that one action; drop both once
+      # actionlint's data catches up.
+      - 'input "client-id" is not defined in action "actions/create-github-app-token@v3"'
+      - 'missing input "app-id" which is required by action "actions/create-github-app-token@v3"'

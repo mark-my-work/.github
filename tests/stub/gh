@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Test double for gh; see stub_gh in tests/lib.sh.
+printf '%s\n' "$*" >> "$STUB_DIR/calls.log"
+# A request body passed on stdin is kept as input.<call number> for the test to read.
+if [[ " $* " == *" --input - "* ]]; then cat > "$STUB_DIR/input.$(wc -l < "$STUB_DIR/calls.log")"; fi
+args="$*"; jq_expr=""; prev=""
+for a in "$@"; do [ "$prev" = "--jq" ] && jq_expr="$a"; prev="$a"; done
+while IFS=$'\t' read -r pattern status file; do
+  [ -n "$pattern" ] || continue
+  # shellcheck disable=SC2053  # the pattern is a glob on purpose
+  if [[ "$args" == $pattern ]]; then
+    [ ! -f "$STUB_DIR/$file.err" ] || cat "$STUB_DIR/$file.err" >&2
+    if [ -n "$jq_expr" ] && [ "$status" -eq 0 ]; then
+      # Real gh exits 1 when its --jq expression fails; so does this.
+      jq -r "$jq_expr" < "$STUB_DIR/$file" || exit 1
+    else
+      cat "$STUB_DIR/$file"; echo
+    fi
+    exit "$status"
+  fi
+done < "$STUB_DIR/rules.tsv"
+echo "stub gh: no rule for: $args" >&2
+exit 97

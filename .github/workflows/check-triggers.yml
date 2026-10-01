@@ -1,0 +1,30 @@
+name: Check workflow triggers
+
+# Required on .github's own pull requests by the github-repo-checks ruleset. This repository
+# is public and its workflows can read the MMW Automation app's key, so no workflow here may use a trigger
+# an outsider can start; scripts/check_triggers.py lists the allowed ones. The script is read
+# from main, so a pull request cannot weaken the check that judges it.
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  check-triggers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pull request's workflows
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Check out the check from main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: .mmw-setup
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install 'pyyaml==6.0.2'
+      - run: python .mmw-setup/scripts/check_triggers.py .github/workflows
