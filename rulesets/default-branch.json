@@ -37,6 +37,19 @@
           "merge"
         ]
       }
+    },
+    {
+      "type": "workflows",
+      "parameters": {
+        "do_not_enforce_on_create": true,
+        "workflows": [
+          {
+            "path": ".github/workflows/verify-authors.yml",
+            "repository_id": "SETUP_REPO_ID",
+            "ref": "refs/heads/main"
+          }
+        ]
+      }
     }
   ]
 }
