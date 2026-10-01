@@ -39,7 +39,9 @@ else
   fail "new: runs the steps in order (create $create, patch $patch, team $team, grant $grant, share $share)"
 fi
 assert_contains "new: lists the board step" "$out" "Auto-add to project"
-assert_contains "new: lists the plugin step" "$out" "Install the Claude Code plugins"
+assert_absent "new: lists no plugin step" "$out" "Claude Code plugins"
+assert_absent "new: lists no label step" "$out" "default labels"
+assert_contains "new: lists completing the files" "$out" "Complete README.md and CLAUDE.md"
 assert_contains "new: lists leaving the team" "$out" "Remove yourself from the team hr"
 
 # --- Run again: nothing is created twice

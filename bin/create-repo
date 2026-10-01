@@ -92,10 +92,8 @@ echo "Shared $SECRET with $ORG/$name."
 cat <<MSG
 
 $ORG/$name is created. The steps done by hand are in $GUIDE:
-  1. For a new part of the company: add its label to the organization's default labels and to $ORG/mmw.
-  2. On the MMW board, add an "Auto-add to project" workflow for $name.
-  3. Add people to the team $team.
-  4. Remove yourself from the team $team if you do not work in $name: GitHub makes whoever creates a team its maintainer.
-  5. Install the Claude Code plugins that .claude/settings.json enables: enabling a plugin does not install it.
-  6. Complete README.md and CLAUDE.md.
+  1. On the MMW board, add an "Auto-add to project" workflow for $name.
+  2. Add people to the team $team.
+  3. Remove yourself from the team $team if you do not work in $name: GitHub makes whoever creates a team its maintainer.
+  4. Complete README.md and CLAUDE.md.
 MSG
