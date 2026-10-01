@@ -4,27 +4,12 @@
   "enforcement": "active",
   "bypass_actors": [],
   "conditions": {
-    "ref_name": {
-      "include": [
-        "~DEFAULT_BRANCH"
-      ],
-      "exclude": []
-    },
-    "repository_name": {
-      "include": [
-        "mmw-scratch-*"
-      ],
-      "exclude": [],
-      "protected": false
-    }
+    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] },
+    "repository_name": { "include": ["~ALL"], "exclude": [], "protected": false }
   },
   "rules": [
-    {
-      "type": "deletion"
-    },
-    {
-      "type": "non_fast_forward"
-    },
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
     {
       "type": "pull_request",
       "parameters": {
@@ -33,9 +18,7 @@
         "require_code_owner_review": false,
         "require_last_push_approval": false,
         "required_review_thread_resolution": false,
-        "allowed_merge_methods": [
-          "merge"
-        ]
+        "allowed_merge_methods": ["merge"]
       }
     },
     {
@@ -43,11 +26,7 @@
       "parameters": {
         "do_not_enforce_on_create": true,
         "workflows": [
-          {
-            "path": ".github/workflows/verify-authors.yml",
-            "repository_id": "SETUP_REPO_ID",
-            "ref": "refs/heads/main"
-          }
+          { "path": ".github/workflows/verify-authors.yml", "repository_id": "SETUP_REPO_ID", "ref": "refs/heads/main" }
         ]
       }
     }
