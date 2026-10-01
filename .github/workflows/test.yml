@@ -3,6 +3,7 @@ name: Tests
 # Required on .github's own pull requests by the github-repo-checks ruleset: the scripts'
 # tests, shellcheck over every shell script, and actionlint over every workflow.
 on:
+  issue_comment:
   pull_request:
   push:
     branches: [main]
