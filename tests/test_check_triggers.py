@@ -36,6 +36,13 @@ class CheckTriggersTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("`pull_request`", result.stdout)
 
+    def test_quoted_on_key_is_read(self):
+        allowed = run({"x.yml": '"on": push\njobs: {}\n'})
+        self.assertEqual(allowed.returncode, 0, allowed.stdout)
+        refused = run({"x.yml": '"on": issue_comment\njobs: {}\n'})
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("trigger `issue_comment` is not allowed", refused.stdout)
+
     def test_missing_on_fails(self):
         result = run({"x.yml": "jobs: {}\n"})
         self.assertEqual(result.returncode, 1)
