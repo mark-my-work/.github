@@ -24,6 +24,28 @@ assert_eq "merge commits only" "$(input_of "$put" | jq -c '.rules[] | select(.ty
 
 for file in "$ROOT"/rulesets/*.json; do
   if jq -e . "$file" >/dev/null; then pass "$(basename "$file") is valid JSON"; else fail "$(basename "$file") is not valid JSON"; fi
+  assert_eq "$(basename "$file"): active, on default branches, no bypass" \
+    "$(jq -c '[.target, .enforcement, .conditions.ref_name.include, .bypass_actors]' "$file")" '["branch","active",["~DEFAULT_BRANCH"],[]]'
+  while IFS= read -r path; do
+    if [ -f "$ROOT/$path" ]; then pass "$(basename "$file"): requires $path, which exists"
+    else fail "$(basename "$file"): requires $path, which is not in .github/workflows"; fi
+  done < <(jq -r '.rules[] | select(.type == "workflows") | .parameters.workflows[].path' "$file")
+  assert_eq "$(basename "$file"): required workflows run from .github's main" \
+    "$(jq -c '[.rules[] | select(.type == "workflows") | .parameters | (.do_not_enforce_on_create, (.workflows[] | .repository_id, .ref))] | unique' "$file")" \
+    "$(jq -c '[.rules[] | select(.type == "workflows")] | if length == 0 then [] else [true,"SETUP_REPO_ID","refs/heads/main"] end' "$file")"
 done
+
+db="$ROOT/rulesets/default-branch.json"
+# Task 6 stages this file on mmw-scratch-* without its workflows rule; Task 14 restores ~ALL.
+assert_contains "default-branch: every repository, or the staged scratch name" '["~ALL"] ["mmw-scratch-*"]' "$(jq -c .conditions.repository_name.include "$db")"
+assert_contains "default-branch: blocks deletion, force-push, and needs a pull request" \
+  "$(jq -c '[.rules[].type]' "$db")" '"deletion","non_fast_forward","pull_request"'
+assert_eq "default-branch: no approval required, merge commits only" \
+  "$(jq -c '.rules[] | select(.type == "pull_request") | .parameters | [.required_approving_review_count, .allowed_merge_methods]' "$db")" '[0,["merge"]]'
+grc="$ROOT/rulesets/github-repo-checks.json"
+assert_eq "github-repo-checks: .github only" "$(jq -c .conditions.repository_name.include "$grc")" '[".github"]'
+assert_eq "github-repo-checks: requires check-triggers and test" \
+  "$(jq -c '[.rules[] | select(.type == "workflows") | .parameters.workflows[].path] | sort' "$grc")" \
+  '[".github/workflows/check-triggers.yml",".github/workflows/test.yml"]'
 
 finish

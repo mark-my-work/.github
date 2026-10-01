@@ -16,10 +16,18 @@ stub_gh() {
   : > "$STUB_DIR/calls.log"; : > "$STUB_DIR/rules.tsv"
   PATH="$ROOT/tests/stub:$PATH"; export PATH
 }
-reply() { # reply <glob> <status> <body>
+reply() { # reply <glob> <status> <body> [<stderr>]
   local f; f=$(mktemp -p "$STUB_DIR" resp.XXXX)
   printf '%s' "$3" > "$f"
+  [ $# -lt 4 ] || printf '%s\n' "$4" > "$f.err"
   printf '%s\t%s\t%s\n' "$1" "$2" "$(basename "$f")" >> "$STUB_DIR/rules.tsv"
+}
+# Like reply, but the rule is checked before every rule already added, so a test can
+# override a rule a shared setup function added.
+reply_first() {
+  reply "$@"
+  { tail -n 1 "$STUB_DIR/rules.tsv"; sed '$d' "$STUB_DIR/rules.tsv"; } > "$STUB_DIR/rules.new"
+  mv "$STUB_DIR/rules.new" "$STUB_DIR/rules.tsv"
 }
 calls() { cat "$STUB_DIR/calls.log"; }
 finish() { if [ "$FAILS" -eq 0 ]; then echo "all passed"; else echo "$FAILS failed"; exit 1; fi; }

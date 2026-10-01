@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks the author of every commit a pull request adds: a @markmywork.ca address and a name
-# of at least two words, unless the author is a bot on BOT_AUTHORS.
+# of at least two words with a letter in each, unless the author is a bot on BOT_AUTHORS.
 # Usage: verify-authors.sh <base-branch> <head-sha>, run inside a full-history checkout.
 # Commits already on origin/<base-branch> are accepted history and are not re-checked.
 set -euo pipefail
@@ -41,13 +41,14 @@ while IFS= read -r sha; do
     echo "Commit $short: bot author '$name' accepted."
     continue
   fi
-  # Quoting $CORP_DOMAIN keeps the dot literal, so x@evil.markmywork.ca and
-  # markmywork.ca@evil.com are both rejected.
-  case "$email_lc" in
-    *@"$CORP_DOMAIN") : ;;
-    *) echo "::error::Commit $short: author email '$email' is not a @$CORP_DOMAIN address."; fail=1 ;;
-  esac
-  if ! grep -qE '[[:alpha:]]' <<<"$name" || [ "$(wc -w <<<"$name" | tr -d '[:space:]')" -lt 2 ]; then
+  # One non-empty local part with no second @, then exactly the domain: rejects
+  # x@evil.markmywork.ca, markmywork.ca@evil.com, @markmywork.ca and a@b@markmywork.ca.
+  if ! [[ $email_lc =~ ^[^@[:space:]]+@${CORP_DOMAIN//./\\.}$ ]]; then
+    echo "::error::Commit $short: author email '$email' is not a @$CORP_DOMAIN address."
+    fail=1
+  fi
+  # At least two words that each contain a letter.
+  if [ "$(awk '{ n = 0; for (i = 1; i <= NF; i++) if ($i ~ /[[:alpha:]]/) n++; print n }' <<<"$name")" -lt 2 ]; then
     echo "::error::Commit $short: author name '$name' must be a full name like 'Dave Cherkassky', not a single-word handle."
     fail=1
   fi
