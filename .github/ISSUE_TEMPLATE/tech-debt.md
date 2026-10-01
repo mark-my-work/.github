@@ -5,6 +5,9 @@ title: 'tech-debt: '
 labels: tech-debt
 ---
 
+<!-- Set the issue TYPE (not a label) to **Task** — a cleanup or refactor with no behavior change has no
+     UI component. (There is no `enhancement` label in mark-my-work repositories.) -->
+
 <!-- One line of provenance + framing, e.g.:
      **Low-priority tech-debt / DRY** — surfaced by the `xhigh` code review of branch `<branch>` (finding #N).
      Backlog; no behavior change today. Part of #<epic>. -->
