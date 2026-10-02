@@ -17,3 +17,5 @@ The GitHub setup every `mark-my-work` repository shares. The design of record is
 A change to a shared workflow reaches every repository the moment it merges. Test it first from a scratch repository whose caller file points at the change's branch.
 
 Every workflow here may use only the triggers `scripts/check_triggers.py` allows, because this repository is public and its workflows can read the MMW Automation app's private key.
+
+Issues are turned off here and in `mark-my-work/.github-template`. File an issue about either repository in [`mark-my-work/mmw`](https://github.com/mark-my-work/mmw/issues), where the MMW board tracks it, and start the pull request's description with `Closes mark-my-work/mmw#<n>`, which closes the issue when the pull request merges. For work split over several pull requests, start all but the last with `Part of mark-my-work/mmw#<n>`. The board workflows move only an issue in the pull request's own repository, so move the issue to In progress and In review by hand.
