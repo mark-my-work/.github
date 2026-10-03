@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Reads mark-my-work's access configuration and prints one line for each place it breaks the
+# rules of mark-my-work/mmw#926: access only through teams, two owners listed in org-owners,
+# teams named and nested by company, administrators maintaining every team, and the MMW
+# project the only one. Changes nothing.
+# Exits 0 with no violations, 1 with any, 2 when it cannot read the organization in full —
+# an incomplete read reports no result, never a clean one.
+# Usage: bin/check-access (as an organization owner; only owners can read role assignments)
+set -euo pipefail
+
+ORG=mark-my-work
+ADMINS="org-func-administrators"
+PROJECT=2
+
+die() { echo "check-access: $*" >&2; exit 2; }
+[ $# -eq 0 ] || die "usage: check-access"
+
+# api <var> <gh api args...>: sets var to gh's output; stops the run, with gh's reason, on any
+# failure. Call it directly, not in $(...), so the stop ends the run.
+api() {
+  local var=$1 out err; shift
+  err=$(mktemp)
+  if out=$(gh api "$@" 2>"$err"); then
+    rm -f "$err"; printf -v "$var" '%s' "$out"; return 0
+  fi
+  echo "check-access: gh api $1 failed: $(head -c 300 "$err")" >&2
+  rm -f "$err"
+  exit 2
+}
+# lines_to_json: stdin, one value per line, as a JSON array of strings.
+lines_to_json() { jq -R -s -c 'split("\n") | map(select(. != ""))'; }
+
+# 1. The person running this must be an owner with the admin:org scope: the organization-role
+#    endpoints answer only owners, and only with that scope.
+login="" role=""
+api login user --jq .login
+api role "orgs/$ORG/memberships/$login" --jq .role
+[ "$role" = admin ] || die "$login is not an owner of $ORG (role: $role); only owners can read its role assignments"
+scopes=$(gh api -i user | tr -d '\r' | awk -F': ' 'tolower($1) == "x-oauth-scopes" { print $2 }')
+grep -qE '(^|, )admin:org(,|$)' <<<"$scopes" || die "gh's token lacks the 'admin:org' scope: run gh auth refresh -s admin:org"
+
+# 2. Read everything first, so a failed read stops the run before any line is printed.
+settings="" org="" outside="" repos="" role_list=""
+api settings "orgs/$ORG" --jq '{base: .default_repository_permission,
+  create_repos: .members_can_create_repositories, create_teams: .members_can_create_teams,
+  invite_outside: .members_can_invite_outside_collaborators}'
+
+# GraphQL, because it lists a team's own members apart from its child teams' (IMMEDIATE),
+# and a team's project role through minPermissionLevel. $org is a GraphQL variable.
+# shellcheck disable=SC2016
+query='query($org: String!) { organization(login: $org) {
+  membersWithRole(first: 100) { pageInfo { hasNextPage } edges { role node { login } } }
+  projectsV2(first: 100) { pageInfo { hasNextPage } nodes { number closed } }
+  teams(first: 100) { pageInfo { hasNextPage } nodes {
+    slug parentTeam { slug }
+    members(membership: IMMEDIATE, first: 100) { pageInfo { hasNextPage } edges { role node { login } } }
+    write: projectsV2(first: 100, minPermissionLevel: WRITE) { nodes { number } }
+    admin: projectsV2(first: 100, minPermissionLevel: ADMIN) { nodes { number } } } } } }'
+api org graphql -f query="$query" -F org="$ORG" --jq '.data.organization | {
+  truncated: ([.membersWithRole, .projectsV2, .teams, .teams.nodes[].members] | any(.pageInfo.hasNextPage)),
+  members: [.membersWithRole.edges[] | {login: .node.login, owner: (.role == "ADMIN")}],
+  projects: [.projectsV2.nodes[] | select(.closed | not) | .number],
+  teams: [.teams.nodes[] | {slug, parent: .parentTeam.slug,
+    members: [.members.edges[] | {login: .node.login, maintainer: (.role == "MAINTAINER")}],
+    write: [.write.nodes[].number], admin: [.admin.nodes[].number]}]}'
+[ "$(jq -r .truncated <<<"$org")" = false ] || die "the organization has more than 100 members, teams, team members or projects; page the GraphQL query before relying on this check"
+
+api outside "orgs/$ORG/outside_collaborators" --paginate --jq '.[].login'
+outside=$(lines_to_json <<<"$outside")
+
+repo_names=""
+api repo_names "orgs/$ORG/repos" --paginate --jq '.[].name'
+repos='[]'
+while read -r name; do
+  [ -n "$name" ] || continue
+  direct="" grants=""
+  api direct "repos/$ORG/$name/collaborators?affiliation=direct" --paginate --jq '.[].login'
+  api grants "repos/$ORG/$name/teams" --paginate --jq '.[] | {slug, permission}'
+  repos=$(jq -c --arg name "$name" --argjson direct "$(lines_to_json <<<"$direct")" \
+    --argjson grants "$(jq -s -c . <<<"$grants")" '. + [{name: $name, direct: $direct, grants: $grants}]' <<<"$repos")
+done <<<"$repo_names"
+
+api role_list "orgs/$ORG/organization-roles" --jq '.roles[] | [.id, .name] | @tsv'
+roles='[]'
+while IFS=$'\t' read -r id name; do
+  [ -n "$id" ] || continue
+  teams="" users=""
+  api teams "orgs/$ORG/organization-roles/$id/teams" --paginate --jq '.[] | {slug, assignment}'
+  api users "orgs/$ORG/organization-roles/$id/users" --paginate --jq '.[] | {login, assignment}'
+  roles=$(jq -c --arg name "$name" --argjson teams "$(jq -s -c . <<<"$teams")" \
+    --argjson users "$(jq -s -c . <<<"$users")" '. + [{name: $name, teams: $teams, users: $users}]' <<<"$roles")
+done <<<"$role_list"
+
+# 3. The rules, one line per violation.
+violations=$(jq -n -r --arg org "$ORG" --arg admins "$ADMINS" --argjson project "$PROJECT" \
+  --argjson s "$settings" --argjson o "$org" --argjson outside "$outside" \
+  --argjson repos "$repos" --argjson roles "$roles" '
+  def team($slug): first($o.teams[] | select(.slug == $slug)) // null;
+  def logins: [.members[].login];
+  def holders($role): [first($roles[] | select(.name == $role)) // {teams: []}
+    | .teams[] | select(.assignment != "indirect") | .slug];
+  ((team($admins) // {members: []}) | logins) as $adm
+  | [$o.members[] | select(.owner) | .login] as $owners
+  | [$o.teams[] | select(.parent == null and (.slug | startswith("org-") | not))] as $companies
+  | [$companies[].slug] as $company_slugs
+
+  # Owners and org-owners
+  | (team("org-owners") as $oo
+     | if $oo == null then "the team org-owners does not exist"
+       else ($owners - ($oo | logins))[] as $l | "owner \($l) is not in org-owners"
+       end),
+    (team("org-owners") // {members: []} | logins - $owners - $adm | .[]
+     | "\(.) is in org-owners but is neither an owner nor an administrator"),
+    (if team($admins) == null then "the team \($admins) does not exist" else empty end),
+
+  # Organization settings
+    (if $s.base != "none" then "the base repository permission is \($s.base), not none" else empty end),
+    (if $s.create_repos then "members can create repositories; only owners should" else empty end),
+    (if $s.create_teams then "members can create teams; only owners should" else empty end),
+    (if $s.invite_outside then "members can invite outside collaborators; only owners should" else empty end),
+
+  # Access outside teams
+    ($outside[] | "\(.) is an outside collaborator"),
+    ($repos[] | .name as $r | .direct[] | "\(.) has direct access to \($org)/\($r)"),
+
+  # Team names and nesting
+    ($o.teams[] | select(.parent != null) | . as $t
+     | if ($company_slugs | index($t.parent)) == null
+       then "the team \($t.slug) is inside \($t.parent), which is not a company team"
+       elif ($t.slug | test("^" + $t.parent + "-(dept|func)-[a-z0-9-]+$") | not)
+       then "the team \($t.slug) is inside \($t.parent) but is not named \($t.parent)-dept-<department> or \($t.parent)-func-<function>"
+       else empty end),
+
+  # Company teams
+    ($o.members[].login as $l
+     | [$companies[] | select(logins | index($l)) | .slug] as $in
+     | if ($in | length) == 0 then "\($l) is in no company team"
+       elif ($in | length) > 1 and ($adm | index($l)) == null
+       then "\($l) is in more than one company team: \($in | sort | join(", "))"
+       else empty end),
+    ($o.teams[] | select(.parent != null) | . as $t | team($t.parent) as $c
+     | select($c != null and ($company_slugs | index($c.slug)) != null)
+     | ($t | logins) - ($c | logins) - $adm | .[]
+     | "\(.) is in \($t.slug) but not in its company team \($c.slug)"),
+
+  # Administrators maintain every team
+    ($adm[] as $a | $o.teams[]
+     | select(any(.members[]; .login == $a and .maintainer) | not)
+     | "administrator \($a) is not a maintainer of \(.slug)"),
+
+  # Organization roles
+    (holders("all_repo_admin") - [$admins] | .[] | "the team \(.) holds all_repo_admin"),
+    (if (holders("all_repo_admin") | index($admins)) == null then "\($admins) does not hold all_repo_admin" else empty end),
+    (holders("all_repo_maintain")[] | "the team \(.) holds all_repo_maintain"),
+    ($roles[] | .name as $r | .users[] | select(.assignment != "indirect")
+     | "\(.login) is assigned \($r) directly"),
+    (if (holders("all_repo_triage") | index("mmw")) == null then "mmw does not hold all_repo_triage" else empty end),
+    (if (holders("all_repo_write") | index("mmw-func-developers")) == null then "mmw-func-developers does not hold all_repo_write" else empty end),
+
+  # Repository grants that change settings
+    ($repos[] | .name as $r | .grants[]
+     | select((.permission == "maintain" or .permission == "admin") and .slug != $admins)
+     | "the team \(.slug) has \(.permission) on \($org)/\($r)"),
+
+  # The MMW project
+    ($o.projects - [$project] | .[] | "project \(.) is open; the MMW project (\($project)) must be the only one"),
+    (if ($o.projects | index($project)) == null then "the MMW project (\($project)) is not open" else empty end),
+    (if ((team("mmw") // {write: []}).write | index($project)) == null then "mmw does not have Write on the MMW project" else empty end),
+    (if ((team($admins) // {admin: []}).admin | index($project)) == null then "\($admins) does not have Admin on the MMW project" else empty end),
+    ($o.teams[] | select(.slug != $admins and (.admin | index($project)) != null)
+     | "the team \(.slug) has Admin on the MMW project")
+')
+
+if [ -z "$violations" ]; then
+  echo "No violations."
+  exit 0
+fi
+printf '%s\n' "$violations"
+count=$(wc -l <<<"$violations")
+echo "$count violation$([ "$count" -eq 1 ] || echo s)."
+exit 1

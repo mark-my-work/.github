@@ -1,6 +1,6 @@
 # mark-my-work/.github
 
-The GitHub setup every `mark-my-work` repository shares. The design of record is [`docs/plans/876-standard-github-repo-setup.md`](https://github.com/mark-my-work/mmw/blob/main/docs/plans/876-standard-github-repo-setup.md) in `mark-my-work/mmw`; creating a repository is covered by `docs/guides/Creating an MMW GitHub Repository.md` there.
+The GitHub setup every `mark-my-work` repository shares. The design of record is [`docs/plans/876-standard-github-repo-setup.md`](https://github.com/mark-my-work/mmw/blob/main/docs/plans/876-standard-github-repo-setup.md) in `mark-my-work/mmw`, and the teams and access are designed in [`docs/plans/926-github-access-through-teams.md`](https://github.com/mark-my-work/mmw/blob/main/docs/plans/926-github-access-through-teams.md). Creating a repository is covered by `docs/guides/Creating an MMW GitHub Repository.md` there, and teams and access by `docs/guides/Managing MMW GitHub Teams and Access.md`.
 
 | Path | What it is |
 |---|---|
@@ -11,7 +11,8 @@ The GitHub setup every `mark-my-work` repository shares. The design of record is
 | `.github/workflows/verify-authors.yml` | the authorship check the `default-branch` ruleset requires on every pull request |
 | `.github/workflows/check-triggers.yml`, `.github/workflows/test.yml` | the checks the `github-repo-checks` ruleset requires on this repository's pull requests |
 | `rulesets/`, `bin/apply-rulesets` | the organization rulesets, applied with `bin/apply-rulesets` |
-| `bin/create-repo` | creates a repository with the standard setup |
+| `bin/create-repo` | creates a repository with the standard setup and gives an existing team write access; it never creates a team |
+| `bin/check-access` | reports every place the organization's teams, roles and settings break the access rules; run by an owner, it changes nothing |
 | `scripts/`, `tests/` | the scripts the workflows run, and their tests (`tests/run.sh`) |
 
 A change to a shared workflow reaches every repository the moment it merges. Test it first from a scratch repository whose caller file points at the change's branch.
