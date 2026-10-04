@@ -43,7 +43,7 @@ GRAPHQL=$(jq -c . <<'JSON'
        {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}}]}}]}}}}
 JSON
 )
-SETTINGS='{"default_repository_permission":"none","members_can_create_repositories":false,"members_can_create_teams":false,"members_can_invite_outside_collaborators":false}'
+SETTINGS='{"default_repository_permission":"none","members_can_create_repositories":false,"members_can_create_teams":false,"members_can_invite_outside_collaborators":true}'
 ROLES='{"total_count":4,"roles":[{"id":8136,"name":"all_repo_admin"},{"id":8135,"name":"all_repo_maintain"},{"id":8133,"name":"all_repo_triage"},{"id":8134,"name":"all_repo_write"}]}'
 
 # good_org [scopes]: signed in as an owner, with every read answering as #926 configures it.
@@ -112,8 +112,7 @@ violation "no org-owners" "the team org-owners does not exist"
 for setting in \
     'default_repository_permission|"read"|the base repository permission is read, not none' \
     'members_can_create_repositories|true|members can create repositories' \
-    'members_can_create_teams|true|members can create teams' \
-    'members_can_invite_outside_collaborators|true|members can invite outside collaborators'; do
+    'members_can_create_teams|true|members can create teams'; do
   IFS='|' read -r key value message <<<"$setting"
   good_org
   reply_first 'api orgs/mark-my-work --jq *' 0 "$(jq -c ".$key = $value" <<<"$SETTINGS")"

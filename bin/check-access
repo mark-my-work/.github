@@ -53,9 +53,11 @@ done
 
 # 2. Read everything first, so a failed read stops the run before any line is printed.
 settings="" org="" outside="" repos="" role_list=""
+# members_can_invite_outside_collaborators is not checked: only GitHub Enterprise Cloud can
+# turn it off, so on mark-my-work's Team plan a repository admin can always invite one. The
+# outside-collaborator rule below reports any that is added (plan O10).
 api settings "orgs/$ORG" --jq '{base: .default_repository_permission,
-  create_repos: .members_can_create_repositories, create_teams: .members_can_create_teams,
-  invite_outside: .members_can_invite_outside_collaborators}'
+  create_repos: .members_can_create_repositories, create_teams: .members_can_create_teams}'
 [ "$(jq '[.[] | select(. == null)] | length' <<<"$settings")" = 0 ] ||
   die "orgs/$ORG answered without some of its member settings; the check cannot read them"
 
@@ -134,7 +136,6 @@ violations=$(jq -n -r --arg org "$ORG" --arg admins "$ADMINS" --argjson project 
     (if $s.base != "none" then "the base repository permission is \($s.base), not none" else empty end),
     (if $s.create_repos then "members can create repositories; only owners should" else empty end),
     (if $s.create_teams then "members can create teams; only owners should" else empty end),
-    (if $s.invite_outside then "members can invite outside collaborators; only owners should" else empty end),
 
   # Access outside teams
     ($outside[] | "\(.) is an outside collaborator"),
