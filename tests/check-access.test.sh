@@ -18,34 +18,29 @@ GRAPHQL=$(jq -c . <<'JSON'
      "members":{"pageInfo":{"hasNextPage":false},"edges":[
        {"role":"MAINTAINER","node":{"login":"dcherk"}},
        {"role":"MEMBER","node":{"login":"david-lorber"}},
-       {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}}]},
-     "write":{"nodes":[]},"admin":{"nodes":[]}},
+       {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}}]}},
     {"slug":"org-func-administrators","parentTeam":null,
      "members":{"pageInfo":{"hasNextPage":false},"edges":[
        {"role":"MAINTAINER","node":{"login":"dcherk"}},
-       {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}}]},
-     "write":{"nodes":[{"number":2}]},"admin":{"nodes":[{"number":2}]}},
+       {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}}]}},
     {"slug":"mmw","parentTeam":null,
      "members":{"pageInfo":{"hasNextPage":false},"edges":[
        {"role":"MAINTAINER","node":{"login":"dcherk"}},
        {"role":"MEMBER","node":{"login":"david-lorber"}},
        {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}},
        {"role":"MEMBER","node":{"login":"mvajpey8"}},
-       {"role":"MEMBER","node":{"login":"pbjr88"}}]},
-     "write":{"nodes":[{"number":2}]},"admin":{"nodes":[]}},
+       {"role":"MEMBER","node":{"login":"pbjr88"}}]}},
     {"slug":"mmw-dept-product","parentTeam":{"slug":"mmw"},
      "members":{"pageInfo":{"hasNextPage":false},"edges":[
        {"role":"MAINTAINER","node":{"login":"dcherk"}},
        {"role":"MEMBER","node":{"login":"david-lorber"}},
        {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}},
        {"role":"MEMBER","node":{"login":"mvajpey8"}},
-       {"role":"MEMBER","node":{"login":"pbjr88"}}]},
-     "write":{"nodes":[]},"admin":{"nodes":[]}},
+       {"role":"MEMBER","node":{"login":"pbjr88"}}]}},
     {"slug":"mmw-func-developers","parentTeam":{"slug":"mmw"},
      "members":{"pageInfo":{"hasNextPage":false},"edges":[
        {"role":"MAINTAINER","node":{"login":"dcherk"}},
-       {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}}]},
-     "write":{"nodes":[]},"admin":{"nodes":[]}}]}}}}
+       {"role":"MAINTAINER","node":{"login":"lanamitchell-create"}}]}}]}}}}
 JSON
 )
 SETTINGS='{"default_repository_permission":"none","members_can_create_repositories":false,"members_can_create_teams":false,"members_can_invite_outside_collaborators":false}'
@@ -84,8 +79,7 @@ team_json() {
     parentTeam: (if $parent == "" then null else {slug: $parent} end),
     members: {pageInfo: {hasNextPage: false}, edges: (
       [{role: "MAINTAINER", node: {login: "dcherk"}}, {role: "MAINTAINER", node: {login: "lanamitchell-create"}}]
-      + [$ARGS.positional[] | {role: "MEMBER", node: {login: .}}])},
-    write: {nodes: []}, admin: {nodes: []}}' --args "$@"
+      + [$ARGS.positional[] | {role: "MEMBER", node: {login: .}}])}}' --args "$@"
 }
 
 # violation <case> <expected line>: runs the check and asserts it fails with that line. The
@@ -139,10 +133,10 @@ violation "direct collaborator" "david-lorber has direct access to mark-my-work/
 
 # --- Team names and nesting
 good_org
-graphql "$T += [{\"slug\":\"marketing\",\"parentTeam\":{\"slug\":\"mmw\"},\"members\":{\"pageInfo\":{\"hasNextPage\":false},\"edges\":[{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"dcherk\"}},{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"lanamitchell-create\"}}]},\"write\":{\"nodes\":[]},\"admin\":{\"nodes\":[]}}]"
+graphql "$T += [{\"slug\":\"marketing\",\"parentTeam\":{\"slug\":\"mmw\"},\"members\":{\"pageInfo\":{\"hasNextPage\":false},\"edges\":[{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"dcherk\"}},{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"lanamitchell-create\"}}]}}]"
 violation "child name" "the team marketing is inside mmw but is not named mmw-dept-<department> or mmw-func-<function>"
 good_org
-graphql "$T += [{\"slug\":\"org-owners-dept-x\",\"parentTeam\":{\"slug\":\"org-owners\"},\"members\":{\"pageInfo\":{\"hasNextPage\":false},\"edges\":[{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"dcherk\"}},{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"lanamitchell-create\"}}]},\"write\":{\"nodes\":[]},\"admin\":{\"nodes\":[]}}]"
+graphql "$T += [{\"slug\":\"org-owners-dept-x\",\"parentTeam\":{\"slug\":\"org-owners\"},\"members\":{\"pageInfo\":{\"hasNextPage\":false},\"edges\":[{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"dcherk\"}},{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"lanamitchell-create\"}}]}}]"
 violation "parent not a company" "the team org-owners-dept-x is inside org-owners, which is not a company team"
 good_org
 graphql "$T += [$(team_json org-owners-dept-x org-owners pbjr88)]"
@@ -162,7 +156,7 @@ violation "department at the top: its member" "newhire is in no company team"
 good_org
 graphql "($(team mmw) | .members.edges) |= map(select(.node.login != \"pbjr88\"))"
 violation "no company" "pbjr88 is in no company team"
-BUD="{\"slug\":\"bud\",\"parentTeam\":null,\"members\":{\"pageInfo\":{\"hasNextPage\":false},\"edges\":[{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"dcherk\"}},{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"lanamitchell-create\"}},{\"role\":\"MEMBER\",\"node\":{\"login\":\"mvajpey8\"}}]},\"write\":{\"nodes\":[]},\"admin\":{\"nodes\":[]}}"
+BUD="{\"slug\":\"bud\",\"parentTeam\":null,\"members\":{\"pageInfo\":{\"hasNextPage\":false},\"edges\":[{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"dcherk\"}},{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"lanamitchell-create\"}},{\"role\":\"MEMBER\",\"node\":{\"login\":\"mvajpey8\"}}]}}"
 good_org
 graphql "$T += [$BUD]"
 out=$("$SCRIPT" 2>&1); assert_eq "two companies: exits 1" "$?" 1
@@ -226,15 +220,6 @@ assert_absent "extra project: ignores a closed one" "$out" "project 4"
 good_org
 graphql '.data.organization.projectsV2.nodes = [{"number":2,"closed":true}]'
 violation "MMW project closed" "the MMW project (2) is not open"
-good_org
-graphql "($(team mmw) | .write.nodes) = []"
-violation "mmw not writer" "mmw does not have Write on the MMW project"
-good_org
-graphql "($(team org-func-administrators) | .admin.nodes) = []"
-violation "administrators not admin" "org-func-administrators does not have Admin on the MMW project"
-good_org
-graphql "($(team mmw) | .admin.nodes) = [{\"number\":2}]"
-violation "other project admin" "the team mmw has Admin on the MMW project"
 
 # --- Several violations are all reported and counted
 good_org

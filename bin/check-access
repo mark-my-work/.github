@@ -2,8 +2,8 @@
 # Reads mark-my-work's access configuration and prints one line for each place it breaks the
 # rules of mark-my-work/mmw#926: repository access only through teams, every owner listed in
 # org-owners, teams named and nested by company, administrators maintaining every team, and
-# the MMW project the only one. Changes nothing. GitHub's API does not show who was given the
-# MMW project directly, so that is checked by hand, on the project's Manage access page.
+# the MMW project the only one. Changes nothing. GitHub's API does not show who has access to
+# the MMW project or with what role, so that is checked by hand, on its Manage access page.
 # Exits 0 with no violations and 1 with any. Exits 2 when it cannot check: a usage error, a
 # runner who is not an owner with the repo and admin:org scopes, or a read that fails or comes
 # back incomplete — an incomplete read reports no result, never a clean one.
@@ -59,24 +59,21 @@ api settings "orgs/$ORG" --jq '{base: .default_repository_permission,
 [ "$(jq '[.[] | select(. == null)] | length' <<<"$settings")" = 0 ] ||
   die "orgs/$ORG answered without some of its member settings; the check cannot read them"
 
-# GraphQL, because it lists a team's own members apart from its child teams' (IMMEDIATE),
-# and a team's project role through minPermissionLevel. $org is a GraphQL variable.
+# GraphQL, because it lists a team's own members apart from its child teams' (IMMEDIATE).
+# $org is a GraphQL variable.
 # shellcheck disable=SC2016
 query='query($org: String!) { organization(login: $org) {
   membersWithRole(first: 100) { pageInfo { hasNextPage } edges { role node { login } } }
   projectsV2(first: 100) { pageInfo { hasNextPage } nodes { number closed } }
   teams(first: 100) { pageInfo { hasNextPage } nodes {
     slug parentTeam { slug }
-    members(membership: IMMEDIATE, first: 100) { pageInfo { hasNextPage } edges { role node { login } } }
-    write: projectsV2(first: 100, minPermissionLevel: WRITE) { nodes { number } }
-    admin: projectsV2(first: 100, minPermissionLevel: ADMIN) { nodes { number } } } } } }'
+    members(membership: IMMEDIATE, first: 100) { pageInfo { hasNextPage } edges { role node { login } } } } } } }'
 api org graphql -f query="$query" -F org="$ORG" --jq '.data.organization | {
   truncated: ([.membersWithRole, .projectsV2, .teams, .teams.nodes[].members] | any(.pageInfo.hasNextPage)),
   members: [.membersWithRole.edges[] | {login: .node.login, owner: (.role == "ADMIN")}],
   projects: [.projectsV2.nodes[] | select(.closed | not) | .number],
   teams: [.teams.nodes[] | {slug, parent: .parentTeam.slug,
-    members: [.members.edges[] | {login: .node.login, maintainer: (.role == "MAINTAINER")}],
-    write: [.write.nodes[].number], admin: [.admin.nodes[].number]}]}'
+    members: [.members.edges[] | {login: .node.login, maintainer: (.role == "MAINTAINER")}]}]}'
 [ "$(jq -r .truncated <<<"$org")" = false ] || die "the organization has more than 100 members, teams, team members or projects; page the GraphQL query before relying on this check"
 
 api outside "orgs/$ORG/outside_collaborators" --paginate --jq '.[].login'
@@ -187,11 +184,7 @@ violations=$(jq -n -r --arg org "$ORG" --arg admins "$ADMINS" --argjson project 
 
   # The MMW project
     ($o.projects - [$project] | .[] | "project \(.) is open; the MMW project (\($project)) must be the only one"),
-    (if ($o.projects | index($project)) == null then "the MMW project (\($project)) is not open" else empty end),
-    (if ((team("mmw") // {write: []}).write | index($project)) == null then "mmw does not have Write on the MMW project" else empty end),
-    (if ((team($admins) // {admin: []}).admin | index($project)) == null then "\($admins) does not have Admin on the MMW project" else empty end),
-    ($o.teams[] | select(.slug != $admins and (.admin | index($project)) != null)
-     | "the team \(.slug) has Admin on the MMW project")
+    (if ($o.projects | index($project)) == null then "the MMW project (\($project)) is not open" else empty end)
 ')
 
 if [ -z "$violations" ]; then

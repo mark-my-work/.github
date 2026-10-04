@@ -12,7 +12,7 @@ The GitHub setup every `mark-my-work` repository shares. The design of record is
 | `.github/workflows/check-triggers.yml`, `.github/workflows/test.yml` | the checks the `github-repo-checks` ruleset requires on this repository's pull requests |
 | `rulesets/`, `bin/apply-rulesets` | the organization rulesets, applied with `bin/apply-rulesets` |
 | `bin/create-repo` | creates a repository with the standard setup and gives an existing team write access; it never creates a team |
-| `bin/check-access` | reports where the organization's teams, roles and settings break the access rules, apart from who was given the MMW project directly, which GitHub's API does not show; run by an owner, it changes nothing |
+| `bin/check-access` | reports where the organization's teams, roles and settings break the access rules, apart from who has access to the MMW project and with what role, which GitHub's API does not show; run by an owner, it changes nothing |
 | `scripts/`, `tests/` | the scripts the workflows run, and their tests (`tests/run.sh`) |
 
 A change to a shared workflow reaches every repository the moment it merges. Test it first from a scratch repository whose caller file points at the change's branch.
