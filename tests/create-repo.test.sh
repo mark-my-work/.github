@@ -69,7 +69,7 @@ reply 'api -X PUT *' 0 ''
 out=$("$SCRIPT" mmw-hr --team hr 2>&1); assert_eq "rerun: exits 0" "$?" 0
 log=$(calls)
 assert_absent "rerun: does not create the repository again" "$log" "repo create"
-assert_absent "rerun: does not create the team again" "$log" "orgs/mark-my-work/teams -f name"
+assert_absent "rerun: creates no team" "$log" "-X POST orgs/mark-my-work/teams"
 assert_contains "rerun: shares the key with the existing id" "$log" "secrets/MMW_AUTOMATION_PRIVATE_KEY/repositories/42"
 
 # --- An existing repository not made from the template, or not private: stops, changing nothing

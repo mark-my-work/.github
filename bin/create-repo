@@ -26,8 +26,8 @@ while [ $# -gt 0 ]; do
 done
 if [ -z "$name" ] || [ -z "$team" ]; then die "$usage"; fi
 # A team is addressed by its slug, which GitHub derives from the name; taking the slug itself
-# keeps the lookup, the creation and the grant naming the same team.
-[[ $team =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--team takes a team slug (lower-case letters, digits and hyphens, such as 'marketing'). $usage"
+# keeps the lookup and the grant naming the same team.
+[[ $team =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--team takes a team slug (lower-case letters, digits and hyphens, such as 'mmw-dept-marketing'). $usage"
 [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "the repository name may hold only letters, digits, '.', '_' and '-'. $usage"
 
 # api_get <var> <path> <jq>: sets var to the result and returns 0; returns 1 when GitHub

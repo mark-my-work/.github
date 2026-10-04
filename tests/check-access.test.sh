@@ -56,7 +56,7 @@ good_org() {
   stub_gh
   reply 'api user --jq .login' 0 '{"login":"dcherk"}'
   reply 'api orgs/mark-my-work/memberships/dcherk *' 0 '{"role":"admin"}'
-  reply 'api -i user' 0 "HTTP/2.0 200 OK"$'\r\n'"X-Oauth-Scopes: ${1:-admin:org, repo, workflow}"$'\r\n\r\n{}'
+  reply 'api user -i' 0 "HTTP/2.0 200 OK"$'\r\n'"X-Oauth-Scopes: ${1:-admin:org, repo, workflow}"$'\r\n\r\n{}'
   reply 'api orgs/mark-my-work --jq *' 0 "$SETTINGS"
   reply 'api graphql *' 0 "$GRAPHQL"
   reply 'api orgs/mark-my-work/outside_collaborators *' 0 '[]'
@@ -73,13 +73,25 @@ good_org() {
 }
 # graphql <jq filter>: answers the GraphQL query with the good organization changed by the filter.
 graphql() { reply_first 'api graphql *' 0 "$(jq -c "$1" <<<"$GRAPHQL")"; }
-# a jq path to one team, by slug
+# the jq path to the teams array, and team <slug>: the jq path to one team in it
 T='.data.organization.teams.nodes'
 team() { printf '%s[] | select(.slug == "%s")' "$T" "$1"; }
+# team_json <slug> <parent slug, or ""> [login...]: a team with both administrators as
+# maintainers and each login as a member.
+team_json() {
+  local slug=$1 parent=$2; shift 2
+  jq -nc --arg slug "$slug" --arg parent "$parent" '{slug: $slug,
+    parentTeam: (if $parent == "" then null else {slug: $parent} end),
+    members: {pageInfo: {hasNextPage: false}, edges: (
+      [{role: "MAINTAINER", node: {login: "dcherk"}}, {role: "MAINTAINER", node: {login: "lanamitchell-create"}}]
+      + [$ARGS.positional[] | {role: "MEMBER", node: {login: .}}])},
+    write: {nodes: []}, admin: {nodes: []}}' --args "$@"
+}
 
-# violation <case> <expected line>: runs the check and asserts it fails with that line.
+# violation <case> <expected line>: runs the check and asserts it fails with that line. The
+# output stays in $out for further assertions.
 violation() {
-  local out status
+  local status
   out=$("$SCRIPT" 2>&1); status=$?
   assert_eq "$1: exits 1" "$status" 1
   assert_contains "$1: reports it" "$out" "$2"
@@ -117,7 +129,10 @@ done
 # --- Collaborators outside teams
 good_org
 reply_first 'api orgs/mark-my-work/outside_collaborators *' 0 '[{"login":"contractor"}]'
+reply_first 'api repos/mark-my-work/mmw/collaborators?affiliation=direct *' 0 '[{"login":"contractor"}]'
 violation "outside collaborator" "contractor is an outside collaborator"
+assert_absent "outside collaborator: reported once" "$out" "contractor has direct access"
+assert_contains "outside collaborator: counted once" "$out" "1 violation."
 good_org
 reply_first 'api repos/mark-my-work/mmw/collaborators?affiliation=direct *' 0 '[{"login":"david-lorber"}]'
 violation "direct collaborator" "david-lorber has direct access to mark-my-work/mmw"
@@ -129,6 +144,19 @@ violation "child name" "the team marketing is inside mmw but is not named mmw-de
 good_org
 graphql "$T += [{\"slug\":\"org-owners-dept-x\",\"parentTeam\":{\"slug\":\"org-owners\"},\"members\":{\"pageInfo\":{\"hasNextPage\":false},\"edges\":[{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"dcherk\"}},{\"role\":\"MAINTAINER\",\"node\":{\"login\":\"lanamitchell-create\"}}]},\"write\":{\"nodes\":[]},\"admin\":{\"nodes\":[]}}]"
 violation "parent not a company" "the team org-owners-dept-x is inside org-owners, which is not a company team"
+good_org
+graphql "$T += [$(team_json org-owners-dept-x org-owners pbjr88)]"
+violation "parent not a company: members" "the team org-owners-dept-x is inside org-owners, which is not a company team"
+assert_absent "parent not a company: no company to compare members with" "$out" "pbjr88 is in org-owners-dept-x but not in its company team"
+good_org
+graphql "$T += [$(team_json mmw-team-x mmw)]"
+violation "child type" "the team mmw-team-x is inside mmw but is not named mmw-dept-<department> or mmw-func-<function>"
+good_org
+graphql "$T += [$(team_json mmw-dept-marketing "")]"
+violation "department at the top" "the team mmw-dept-marketing is not inside mmw; a team named mmw-dept-* or mmw-func-* belongs inside mmw"
+good_org
+graphql ".data.organization.membersWithRole.edges += [{\"role\":\"MEMBER\",\"node\":{\"login\":\"newhire\"}}] | $T += [$(team_json mmw-dept-marketing "" newhire)]"
+violation "department at the top: its member" "newhire is in no company team"
 
 # --- Company teams
 good_org
@@ -143,6 +171,10 @@ assert_absent "two companies: allows an administrator" "$out" "lanamitchell-crea
 good_org
 graphql "$T += [$BUD] | ($(team mmw) | .members.edges) |= map(select(.node.login != \"mvajpey8\"))"
 violation "child outside its company" "mvajpey8 is in mmw-dept-product but not in its company team mmw"
+good_org
+graphql "$T += [$BUD] | ($(team mmw) | .members.edges) |= map(select(.node.login != \"lanamitchell-create\"))"
+out=$("$SCRIPT" 2>&1)
+assert_absent "child outside its company: allows an administrator" "$out" "lanamitchell-create is in mmw-dept-product but not in its company team"
 
 # --- Administrators maintain every team
 good_org
@@ -192,6 +224,9 @@ out=$("$SCRIPT" 2>&1); assert_eq "extra project: exits 1" "$?" 1
 assert_contains "extra project: reports the open one" "$out" "project 3 is open; the MMW project (2) must be the only one"
 assert_absent "extra project: ignores a closed one" "$out" "project 4"
 good_org
+graphql '.data.organization.projectsV2.nodes = [{"number":2,"closed":true}]'
+violation "MMW project closed" "the MMW project (2) is not open"
+good_org
 graphql "($(team mmw) | .write.nodes) = []"
 violation "mmw not writer" "mmw does not have Write on the MMW project"
 good_org
@@ -216,19 +251,47 @@ reply 'api orgs/mark-my-work/memberships/lanamitchell-create *' 0 '{"role":"memb
 out=$("$SCRIPT" 2>&1); assert_eq "member: exits 2" "$?" 2
 assert_contains "member: says why" "$out" "lanamitchell-create is not an owner of mark-my-work (role: member)"
 assert_absent "member: reads nothing else" "$(calls)" "graphql"
+stub_gh
+reply 'api user --jq .login' 0 '{"login":"stranger"}'
+reply 'api orgs/mark-my-work/memberships/stranger *' 1 '{"message":"Not Found"}' 'gh: Not Found (HTTP 404)'
+out=$("$SCRIPT" 2>&1); assert_eq "not a member: exits 2" "$?" 2
+assert_contains "not a member: says why" "$out" "stranger is not an owner of mark-my-work (role: none)"
 good_org 'repo, read:org'
 out=$("$SCRIPT" 2>&1); assert_eq "scope: exits 2" "$?" 2
 assert_contains "scope: names the fix" "$out" "gh auth refresh -s admin:org"
+good_org 'admin:org, read:org'
+out=$("$SCRIPT" 2>&1); assert_eq "repo scope: exits 2" "$?" 2
+assert_contains "repo scope: names the fix" "$out" "gh auth refresh -s repo"
+good_org
+reply_first 'api user -i' 0 "HTTP/2.0 200 OK"$'\r\n\r\n{}'
+out=$("$SCRIPT" 2>&1); assert_eq "no scopes: exits 2" "$?" 2
+assert_contains "no scopes: says why" "$out" "reports no OAuth scopes"
+good_org
+reply_first 'api user -i' 1 '' 'gh: Server Error (HTTP 502)'
+out=$("$SCRIPT" 2>&1); assert_eq "scope read error: exits 2" "$?" 2
+assert_contains "scope read error: shows gh's reason" "$out" "HTTP 502"
+good_org
+reply_first 'api orgs/mark-my-work --jq *' 0 '{"default_repository_permission":"none","members_can_create_repositories":false}'
+out=$("$SCRIPT" 2>&1); assert_eq "settings incomplete: exits 2" "$?" 2
+assert_contains "settings incomplete: says why" "$out" "without some of its member settings"
+assert_absent "settings incomplete: reports no result" "$out" "No violations."
 good_org
 reply_first 'api orgs/mark-my-work/repos *' 1 '' 'gh: Server Error (HTTP 502)'
 out=$("$SCRIPT" 2>&1); assert_eq "read error: exits 2" "$?" 2
 assert_contains "read error: shows gh's reason" "$out" "HTTP 502"
 assert_absent "read error: reports no result" "$out" "No violations."
-good_org
-graphql '.data.organization.teams.pageInfo.hasNextPage = true'
-out=$("$SCRIPT" 2>&1); assert_eq "truncated: exits 2" "$?" 2
-assert_contains "truncated: says why" "$out" "more than 100"
-assert_absent "truncated: reports no result" "$out" "No violations."
+for connection in \
+    'teams;.data.organization.teams' \
+    'members;.data.organization.membersWithRole' \
+    'projects;.data.organization.projectsV2' \
+    'team members;'"$(team mmw)"' | .members'; do
+  IFS=';' read -r what path <<<"$connection"
+  good_org
+  graphql "($path).pageInfo.hasNextPage = true"
+  out=$("$SCRIPT" 2>&1); assert_eq "truncated $what: exits 2" "$?" 2
+  assert_contains "truncated $what: says why" "$out" "more than 100"
+  assert_absent "truncated $what: reports no result" "$out" "No violations."
+done
 
 # --- Arguments are a usage error, before any call
 stub_gh

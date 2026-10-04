@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Reads mark-my-work's access configuration and prints one line for each place it breaks the
-# rules of mark-my-work/mmw#926: access only through teams, two owners listed in org-owners,
-# teams named and nested by company, administrators maintaining every team, and the MMW
-# project the only one. Changes nothing.
-# Exits 0 with no violations, 1 with any, 2 when it cannot read the organization in full —
-# an incomplete read reports no result, never a clean one.
+# rules of mark-my-work/mmw#926: repository access only through teams, every owner listed in
+# org-owners, teams named and nested by company, administrators maintaining every team, and
+# the MMW project the only one. Changes nothing. GitHub's API does not show who was given the
+# MMW project directly, so that is checked by hand, on the project's Manage access page.
+# Exits 0 with no violations and 1 with any. Exits 2 when it cannot check: a usage error, a
+# runner who is not an owner with the repo and admin:org scopes, or a read that fails or comes
+# back incomplete — an incomplete read reports no result, never a clean one.
 # Usage: bin/check-access (as an organization owner; only owners can read role assignments)
 set -euo pipefail
 
@@ -17,11 +19,16 @@ die() { echo "check-access: $*" >&2; exit 2; }
 
 # api <var> <gh api args...>: sets var to gh's output; stops the run, with gh's reason, on any
 # failure. Call it directly, not in $(...), so the stop ends the run.
-api() {
-  local var=$1 out err; shift
+api() { api_or "" "$@"; }
+# api_or <value> <var> <gh api args...>: as api, but sets var to value when GitHub answers 404.
+api_or() {
+  local missing=$1 var=$2 out err; shift 2
   err=$(mktemp)
   if out=$(gh api "$@" 2>"$err"); then
     rm -f "$err"; printf -v "$var" '%s' "$out"; return 0
+  fi
+  if [ -n "$missing" ] && grep -q 'HTTP 404' "$err"; then
+    rm -f "$err"; printf -v "$var" '%s' "$missing"; return 0
   fi
   echo "check-access: gh api $1 failed: $(head -c 300 "$err")" >&2
   rm -f "$err"
@@ -30,20 +37,27 @@ api() {
 # lines_to_json: stdin, one value per line, as a JSON array of strings.
 lines_to_json() { jq -R -s -c 'split("\n") | map(select(. != ""))'; }
 
-# 1. The person running this must be an owner with the admin:org scope: the organization-role
-#    endpoints answer only owners, and only with that scope.
-login="" role=""
+# 1. The person running this must be an owner with the repo and admin:org scopes: the
+#    organization-role endpoints answer only owners, and only with admin:org; without repo,
+#    the repository list leaves out every private repository and still answers 200.
+login="" role="" headers=""
 api login user --jq .login
-api role "orgs/$ORG/memberships/$login" --jq .role
+api_or none role "orgs/$ORG/memberships/$login" --jq .role
 [ "$role" = admin ] || die "$login is not an owner of $ORG (role: $role); only owners can read its role assignments"
-scopes=$(gh api -i user | tr -d '\r' | awk -F': ' 'tolower($1) == "x-oauth-scopes" { print $2 }')
-grep -qE '(^|, )admin:org(,|$)' <<<"$scopes" || die "gh's token lacks the 'admin:org' scope: run gh auth refresh -s admin:org"
+api headers user -i
+scopes=$(tr -d '\r' <<<"$headers" | awk -F': ' 'tolower($1) == "x-oauth-scopes" { print $2 }')
+[ -n "$scopes" ] || die "gh's token reports no OAuth scopes, as a fine-grained or app token (such as one in GH_TOKEN) does; sign in with gh auth login and run gh auth refresh -s admin:org"
+for scope in repo admin:org; do
+  grep -qE "(^|, )$scope(,|$)" <<<"$scopes" || die "gh's token lacks the '$scope' scope: run gh auth refresh -s $scope"
+done
 
 # 2. Read everything first, so a failed read stops the run before any line is printed.
 settings="" org="" outside="" repos="" role_list=""
 api settings "orgs/$ORG" --jq '{base: .default_repository_permission,
   create_repos: .members_can_create_repositories, create_teams: .members_can_create_teams,
   invite_outside: .members_can_invite_outside_collaborators}'
+[ "$(jq '[.[] | select(. == null)] | length' <<<"$settings")" = 0 ] ||
+  die "orgs/$ORG answered without some of its member settings; the check cannot read them"
 
 # GraphQL, because it lists a team's own members apart from its child teams' (IMMEDIATE),
 # and a team's project role through minPermissionLevel. $org is a GraphQL variable.
@@ -101,7 +115,13 @@ violations=$(jq -n -r --arg org "$ORG" --arg admins "$ADMINS" --argjson project 
     | .teams[] | select(.assignment != "indirect") | .slug];
   ((team($admins) // {members: []}) | logins) as $adm
   | [$o.members[] | select(.owner) | .login] as $owners
-  | [$o.teams[] | select(.parent == null and (.slug | startswith("org-") | not))] as $companies
+  | [$o.teams[] | select(.parent == null and (.slug | startswith("org-") | not))] as $top
+  # A top-level team named as a department or function of another top-level team is a child
+  # of that company created without its parent, not a company of its own.
+  | def owner_of($s): first($top[].slug as $c
+      | select($s | startswith($c + "-dept-") or startswith($c + "-func-")) | $c);
+    [$top[] | select(owner_of(.slug) != null)] as $misplaced
+  | ($top - $misplaced) as $companies
   | [$companies[].slug] as $company_slugs
 
   # Owners and org-owners
@@ -121,9 +141,12 @@ violations=$(jq -n -r --arg org "$ORG" --arg admins "$ADMINS" --argjson project 
 
   # Access outside teams
     ($outside[] | "\(.) is an outside collaborator"),
-    ($repos[] | .name as $r | .direct[] | "\(.) has direct access to \($org)/\($r)"),
+    # An outside collaborator is also a direct one; the line above reports them once.
+    ($repos[] | .name as $r | .direct - $outside | .[] | "\(.) has direct access to \($org)/\($r)"),
 
   # Team names and nesting
+    ($misplaced[] | .slug as $s | owner_of($s) as $c
+     | "the team \($s) is not inside \($c); a team named \($c)-dept-* or \($c)-func-* belongs inside \($c)"),
     ($o.teams[] | select(.parent != null) | . as $t
      | if ($company_slugs | index($t.parent)) == null
        then "the team \($t.slug) is inside \($t.parent), which is not a company team"
