@@ -1,31 +1,24 @@
 #!/usr/bin/env bash
 # Creates a private mark-my-work repository with the standard setup: the starting files from
-# .github-template, the organization's merge settings, write access for one team, and the
-# MMW Automation app's key. Safe to run again: it creates only what does not exist yet and
-# re-applies the settings, the team's access and the key's sharing every run.
-# Usage: bin/create-repo <name> --team <team-slug>
+# .github-template, the organization's merge settings, and the MMW Automation app's key. It
+# creates no team and gives no team a role: an owner creates teams, and an administrator gives
+# a department's team its role, apart from creating repositories. Safe to run again: it creates
+# the repository only if it does not exist yet and re-applies the settings and the key's
+# sharing every run.
+# Usage: bin/create-repo <name>
 set -euo pipefail
 
 ORG=mark-my-work
 TEMPLATE="$ORG/.github-template"
 SECRET=MMW_AUTOMATION_PRIVATE_KEY
 GUIDE="docs/guides/Creating an MMW GitHub Repository.md, in $ORG/mmw"
+TEAMS_GUIDE="docs/guides/Managing MMW GitHub Teams and Access.md, in $ORG/mmw"
 
 die() { echo "create-repo: $*" >&2; exit 1; }
-usage="usage: create-repo <name> --team <team-slug>"
+usage="usage: create-repo <name>"
 
-name="" team=""
-while [ $# -gt 0 ]; do
-  case $1 in
-    --team) { [ $# -ge 2 ] && [[ $2 != -* ]]; } || die "$usage"; team=$2; shift 2 ;;
-    -*) die "$usage" ;;
-    *) [ -z "$name" ] || die "$usage"; name=$1; shift ;;
-  esac
-done
-if [ -z "$name" ] || [ -z "$team" ]; then die "$usage"; fi
-# A team is addressed by its slug, which GitHub derives from the name; taking the slug itself
-# keeps the lookup, the creation and the grant naming the same team.
-[[ $team =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--team takes a team slug (lower-case letters, digits and hyphens, such as 'marketing'). $usage"
+if [ $# -ne 1 ] || [[ $1 == -* ]]; then die "$usage"; fi
+name=$1
 [[ $name =~ ^[A-Za-z0-9._-]+$ ]] || die "the repository name may hold only letters, digits, '.', '_' and '-'. $usage"
 
 # api_get <var> <path> <jq>: sets var to the result and returns 0; returns 1 when GitHub
@@ -73,16 +66,7 @@ gh api -X PATCH "repos/$ORG/$name" -F allow_merge_commit=true -F allow_squash_me
   -F allow_rebase_merge=false -F delete_branch_on_merge=true -F allow_auto_merge=false >/dev/null
 echo "Set the merge settings."
 
-# 4. Write access through the team, created if it does not exist.
-team_slug=""
-if ! api_get team_slug "orgs/$ORG/teams/$team" .slug; then
-  gh api -X POST "orgs/$ORG/teams" -f name="$team" -f privacy=closed >/dev/null
-  echo "Created the team $team."
-fi
-gh api -X PUT "orgs/$ORG/teams/${team_slug:-$team}/repos/$ORG/$name" -f permission=push >/dev/null
-echo "Gave $team write access."
-
-# 5. The MMW Automation app's key, which the board workflows need, is shared with listed
+# 4. The MMW Automation app's key, which the board workflows need, is shared with listed
 #    repositories only. The app itself is installed on every repository.
 repo_id=""
 api_get repo_id "repos/$ORG/$name" .id || die "$ORG/$name was not found after it was created"
@@ -93,7 +77,6 @@ cat <<MSG
 
 $ORG/$name is created. The steps done by hand are in $GUIDE:
   1. On the MMW board, add an "Auto-add to project" workflow for $name.
-  2. Add people to the team $team.
-  3. Remove yourself from the team $team if you do not work in $name: GitHub makes whoever creates a team its maintainer.
-  4. Complete README.md and CLAUDE.md.
+  2. Give the department's team its role on $name, as $TEAMS_GUIDE describes.
+  3. Complete README.md and CLAUDE.md.
 MSG
