@@ -11,7 +11,7 @@ labels: hr
 
 **Mark My Work – Access Termination Checklist**
 
-Version 1.2 – November 2026 – supports "MMW ISMS-04" and "MMW ISMS-21"
+Version 1.3 – November 2026 – supports "MMW ISMS-04" and "MMW ISMS-21"
 
 - Complete the checklist whenever an employee, contractor, advisor or tester leaves MMW or their engagement ends. For a change of role, use Section 3 to remove only the access the new role no longer needs.
 - Revoke access on the last working day – do not wait for the next quarterly access review. Set the issue's priority to match how soon that is.
@@ -62,6 +62,7 @@ Mark each item as follows. After filing, ticking boxes is all the issue needs; p
   - [ ] Stripe
   - [ ] Sentry
   - [ ] Domain registrar / DNS
+  - [ ] Streamline
 - [ ] **8.** Application administrative functions used to support teacher accounts – access removed.
 - [ ] **9.** Other access – one sub-item for each account on item 2's list that items 3–8 don't cover. Tick this item when every sub-item is ticked, or mark it N/A if there are none.
 
