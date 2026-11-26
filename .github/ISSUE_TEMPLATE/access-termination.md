@@ -63,7 +63,10 @@ Mark each item as follows. After filing, ticking boxes is all the issue needs; p
   - [ ] Sentry
   - [ ] Domain registrar / DNS
   - [ ] Streamline
-  - [ ] Meta (Facebook, Instagram)
+  - [ ] Meta Business Portfolio
+  - [ ] Facebook
+  - [ ] Instagram
+  - [ ] Google Brand Account
   - [ ] YouTube
   - [ ] LinkedIn
 - [ ] **8.** Application administrative functions used to support teacher accounts – access removed.
